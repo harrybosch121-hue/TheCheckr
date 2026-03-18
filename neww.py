@@ -2045,7 +2045,7 @@ def print_cc_summary(card: dict, code_display: str, amount_display: str):
 
 SUMMARY_ONLY = True
 
-def emit_summary_line(card: dict, code_display: str, amount_display: str, elapsed_seconds: float = None, site_display: str = None):
+def emit_summary_line(card: dict, code_display: str, amount_display: str, elapsed_seconds: float = None, site_display: str = None, force_persist: bool = False):
     try:
         def _status_prefix(s: str) -> str:
             u = str(s or "").upper()
@@ -2100,7 +2100,7 @@ def emit_summary_line(card: dict, code_display: str, amount_display: str, elapse
             print(line)
 
         try:
-            if prefix.startswith("💎"):
+            if force_persist or prefix.startswith("💎") or prefix.startswith("⚠️"):
                 with open("approved.txt", "a", encoding="utf-8") as f:
                     f.write(line + "\n")
         except Exception:
@@ -2165,7 +2165,7 @@ def emit_summary_line(card: dict, code_display: str, amount_display: str, elapse
             print(fallback, file=sys.__stdout__)
 
             try:
-                if prefix_fb.startswith("💎"):
+                if force_persist or prefix_fb.startswith("💎") or prefix_fb.startswith("⚠️"):
                     with open("approved.txt", "a", encoding="utf-8") as f:
                         f.write(fallback + "\n")
             except Exception:

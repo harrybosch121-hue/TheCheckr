@@ -1959,12 +1959,57 @@ class BatchRunner:
         self.captcha_retry_count: Dict[str, int] = {}  # Track retry count per card (by card number)
         self.captcha_max_retries = GLOBAL_CAPTCHA_MAX_RETRIES  # Max retries for CAPTCHA cards (-1 for infinite)
         self.captcha_excluded_sites: Dict[str, List[str]] = {}  # Track sites to exclude per card (by card number)
-        self.error_cards: List[Dict] = []  # Cards that failed after all retries
+        # Disk-backed error/captcha card tracking (avoids in-memory list growth)
+        self._error_cards_file = os.path.join("uploads", f"_err_{batch_id.replace(':', '_')}_{int(time.time())}.tmp")
+        self._error_cards_count = 0
         self.captcha_mode = captcha_mode  # "NO_RETRY" or "WITH_RETRY"
-        self.captcha_no_retry_cards: List[Dict] = []  # Cards skipped in NO_RETRY mode
+        self._captcha_nr_file = os.path.join("uploads", f"_cnr_{batch_id.replace(':', '_')}_{int(time.time())}.tmp")
+        self._captcha_nr_count = 0
         self._stats_pending = {"tested": 0, "approved": 0, "charged": 0}
         self._stats_last_flush = time.time()
         self._source_skip = start_from if start_from > 0 else 0
+
+    # ---- Disk-backed helpers for error / captcha-no-retry cards ----
+
+    def _append_error_card(self, card: Dict, code: str, site: str):
+        """Append a failed card to the disk-backed error file."""
+        pan = card.get("number", "")
+        mm = card.get("month", "")
+        yy = card.get("year", "")
+        cvv = card.get("verification_value", "")
+        try:
+            with open(self._error_cards_file, "a", encoding="utf-8") as f:
+                f.write(f"{pan}|{mm}|{yy}|{cvv} | Error: {code} | Site: {site}\n")
+            self._error_cards_count += 1
+        except Exception as e:
+            logger.error(f"Failed to append error card to disk: {e}")
+
+    def _append_captcha_nr_card(self, card: Dict, code: str, site: str):
+        """Append a CAPTCHA-skipped card (NO_RETRY mode) to disk."""
+        pan = card.get("number", "")
+        mm = card.get("month", "")
+        yy = card.get("year", "")
+        cvv = card.get("verification_value", "")
+        try:
+            with open(self._captcha_nr_file, "a", encoding="utf-8") as f:
+                f.write(f"{pan}|{mm}|{yy}|{cvv}\n")
+            self._captcha_nr_count += 1
+        except Exception as e:
+            logger.error(f"Failed to append captcha_nr card to disk: {e}")
+
+    def _cleanup_aux_files(self):
+        """Remove temporary disk-backed files."""
+        for p in (self._error_cards_file, self._captcha_nr_file):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+    def _clear_retry_tracking(self):
+        """Free CAPTCHA tracking dicts after retries are done."""
+        self.captcha_retry_count.clear()
+        self.captcha_excluded_sites.clear()
 
     def _iter_source_cards(self):
         if self.card_file_path:
@@ -2248,9 +2293,9 @@ class BatchRunner:
                             site_display_val = f"{site_label} |  {display_name.strip()}"
                         logger.info(f"[DEBUG] Writing to approved.txt: {site_display_val}")
                         try:
-                            checkout.emit_summary_line(card, code_display, amount_display, site_display=site_display_val)
+                            checkout.emit_summary_line(card, code_display, amount_display, site_display=site_display_val, force_persist=True)
                         except TypeError:
-                            checkout.emit_summary_line(card, code_display, amount_display)
+                            checkout.emit_summary_line(card, code_display, amount_display, force_persist=True)
                 except Exception:
                     pass
                 
@@ -2586,7 +2631,7 @@ class BatchRunner:
 
         worker_count = max(1, optimal_workers)
         card_queue: asyncio.Queue = asyncio.Queue(maxsize=max(16, worker_count * 2))
-        result_queue: asyncio.Queue = asyncio.Queue()
+        result_queue: asyncio.Queue = asyncio.Queue(maxsize=max(16, worker_count * 2))
         worker_done_marker = object()
 
         async def produce_cards():
@@ -2707,13 +2752,9 @@ class BatchRunner:
                     is_captcha_error = True
                     card_number = str(card.get("number", ""))
                     
-                    # NO_RETRY mode: immediately add to captcha_no_retry_cards and skip
+                    # NO_RETRY mode: immediately append to disk and skip
                     if self.captcha_mode == "NO_RETRY":
-                        self.captcha_no_retry_cards.append({
-                            "card": card,
-                            "code": code_display,
-                            "site": site_label
-                        })
+                        self._append_captcha_nr_card(card, code_display, site_label)
                         logger.info(f"[CAPTCHA NO_RETRY] Card {card_number[-4:]} skipped (CAPTCHA_REQUIRED), will show at end")
                         async with self.lock:
                             self.processed += 1
@@ -2743,12 +2784,8 @@ class BatchRunner:
                         # Skip to next card without counting this one
                         continue
                     else:
-                        # Max retries reached, add to error cards
-                        self.error_cards.append({
-                            "card": card,
-                            "code": code_display,
-                            "site": site_label
-                        })
+                        # Max retries reached, append to error file on disk
+                        self._append_error_card(card, code_display, site_label)
                         logger.info(f"[CAPTCHA] Card {card_number[-4:]} max retries reached, added to error cards")
                         # Don't send declined notification, will be sent as file at end
                         async with self.lock:
@@ -3112,9 +3149,9 @@ class BatchRunner:
                             site_display_val = f"{site_label} |  {display_name.strip()}"
                         logger.info(f"[DEBUG-RUN2] Writing to approved.txt: {site_display_val}")
                         try:
-                            checkout.emit_summary_line(card, code_display, amount_display, site_display=site_display_val)
+                            checkout.emit_summary_line(card, code_display, amount_display, site_display=site_display_val, force_persist=True)
                         except TypeError:
-                            checkout.emit_summary_line(card, code_display, amount_display)
+                            checkout.emit_summary_line(card, code_display, amount_display, force_persist=True)
                 except Exception:
                     pass
                 
@@ -3273,11 +3310,7 @@ class BatchRunner:
                         logger.info(f"CAPTCHA still present for card {card_number[-4:]}, queued again ({new_retry_count}/{max_retries_display})")
                     elif is_still_captcha:
                         # Max retries reached, add to error cards
-                        self.error_cards.append({
-                            "card": retry_card,
-                            "code": r_code,
-                            "site": r_site
-                        })
+                        self._append_error_card(retry_card, r_code, r_site)
                         async with self.lock:
                             self.processed += 1
                         logger.info(f"CAPTCHA max retries for card {card_number[-4:]}, added to error list")
@@ -3335,11 +3368,7 @@ class BatchRunner:
                             logger.info(f"[RETRY FILTER] Card {card_number[-4:]} allowed for retry")
                         else:
                             # Exceeded max retries
-                            self.error_cards.append({
-                                "card": card,
-                                "code": "CAPTCHA_REQUIRED",
-                                "site": ""
-                            })
+                            self._append_error_card(card, "CAPTCHA_REQUIRED", "")
                             async with self.lock:
                                 self.processed += 1
                             logger.info(f"[RETRY FILTER] Card {card_number[-4:]} exceeded max retries (attempted {current_count}, max={self.captcha_max_retries}), added to error cards")
@@ -3389,11 +3418,7 @@ class BatchRunner:
                             logger.info(f"CAPTCHA still present for card {card_number[-4:]}, queued again ({new_retry_count}/{max_retries_display})")
                         elif is_still_captcha:
                             # Max retries reached
-                            self.error_cards.append({
-                                "card": retry_card,
-                                "code": r_code,
-                                "site": r_site
-                            })
+                            self._append_error_card(retry_card, r_code, r_site)
                             async with self.lock:
                                 self.processed += 1
                             logger.info(f"Final CAPTCHA failure for card {card_number[-4:]} after {retry_num} retries")
@@ -3429,71 +3454,49 @@ class BatchRunner:
                     except Exception as e:
                         logger.error(f"Error processing retry: {e}")
 
-        # Send captcha_no_retry_cards if in NO_RETRY mode
-        if self.captcha_mode == "NO_RETRY" and self.captcha_no_retry_cards:
+        # Free CAPTCHA tracking dicts now that retries are done
+        self._clear_retry_tracking()
+
+        # Send captcha_no_retry_cards file if in NO_RETRY mode (read from disk)
+        if self.captcha_mode == "NO_RETRY" and self._captcha_nr_count > 0 and os.path.exists(self._captcha_nr_file):
             try:
-                captcha_lines = []
-                for item in self.captcha_no_retry_cards:
-                    card = item.get("card", {})
-                    pan = card.get("number", "")
-                    mm = card.get("month", "")
-                    yy = card.get("year", "")
-                    cvv = card.get("verification_value", "")
-                    captcha_lines.append(f"{pan}|{mm}|{yy}|{cvv}")
-
-                captcha_content = "\n".join(captcha_lines)
                 captcha_filename = f"captcha_required_{self.batch_id.replace(':', '_')}_{int(time.time())}.txt"
-
-                captcha_file = io.BytesIO(captcha_content.encode("utf-8"))
-                captcha_file.name = captcha_filename
-
-                await update.effective_chat.send_document(
-                    document=captcha_file,
-                    filename=captcha_filename,
-                    caption=f"⚠️ <b>{len(self.captcha_no_retry_cards)} cards with CAPTCHA_REQUIRED (skipped in NO_RETRY mode)</b>",
-                    parse_mode=ParseMode.HTML
-                )
-                logger.info(f"Sent {len(self.captcha_no_retry_cards)} CAPTCHA cards file to user")
+                with open(self._captcha_nr_file, "rb") as f:
+                    await update.effective_chat.send_document(
+                        document=f,
+                        filename=captcha_filename,
+                        caption=f"⚠️ <b>{self._captcha_nr_count} cards with CAPTCHA_REQUIRED (skipped in NO_RETRY mode)</b>",
+                        parse_mode=ParseMode.HTML
+                    )
+                logger.info(f"Sent {self._captcha_nr_count} CAPTCHA cards file to user")
             except Exception as e:
                 logger.error(f"Failed to send captcha_no_retry_cards file: {e}")
 
-        # Send error cards as a txt file if any
-        if self.error_cards:
+        # Send error cards file if any (read from disk)
+        if self._error_cards_count > 0 and os.path.exists(self._error_cards_file):
             try:
-                error_lines = []
-                for err in self.error_cards:
-                    card = err.get("card", {})
-                    pan = card.get("number", "")
-                    mm = card.get("month", "")
-                    yy = card.get("year", "")
-                    cvv = card.get("verification_value", "")
-                    code = err.get("code", "UNKNOWN")
-                    site = err.get("site", "")
-                    error_lines.append(f"{pan}|{mm}|{yy}|{cvv} | Error: {code} | Site: {site}")
-
-                error_content = "\n".join(error_lines)
                 error_filename = f"error_cards_{self.batch_id.replace(':', '_')}_{int(time.time())}.txt"
-
-                error_file = io.BytesIO(error_content.encode("utf-8"))
-                error_file.name = error_filename
-
-                await update.effective_chat.send_document(
-                    document=error_file,
-                    filename=error_filename,
-                    caption=f"❌ <b>{len(self.error_cards)} cards failed with CAPTCHA errors after {self.captcha_max_retries} retries</b>",
-                    parse_mode=ParseMode.HTML
-                )
-                logger.info(f"Sent error cards file with {len(self.error_cards)} cards")
+                with open(self._error_cards_file, "rb") as f:
+                    await update.effective_chat.send_document(
+                        document=f,
+                        filename=error_filename,
+                        caption=f"❌ <b>{self._error_cards_count} cards failed with CAPTCHA errors after {self.captcha_max_retries} retries</b>",
+                        parse_mode=ParseMode.HTML
+                    )
+                logger.info(f"Sent error cards file with {self._error_cards_count} cards")
             except Exception as e:
                 logger.error(f"Error sending error cards file: {e}")
                 try:
                     await update.effective_chat.send_message(
-                        f"❌ <b>{len(self.error_cards)} cards failed with CAPTCHA errors</b>\n\n"
+                        f"❌ <b>{self._error_cards_count} cards failed with CAPTCHA errors</b>\n\n"
                         f"Could not send file: {str(e)[:100]}",
                         parse_mode=ParseMode.HTML
                     )
                 except Exception:
                     pass
+
+        # Clean up temporary disk-backed files
+        self._cleanup_aux_files()
         # ============ END CAPTCHA RETRY LOGIC ============
 
         cancelled = False
@@ -10457,9 +10460,15 @@ async def cmd_retrieve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filename = args[0].lower()
     
     if filename == "approved.txt":
-        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approved.txt")
+        # Use CWD-relative path (matches where emit_summary_line writes)
+        file_path = "approved.txt"
+        if not os.path.exists(file_path):
+            # Fallback: check in the script directory
+            file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approved.txt")
     elif filename == "user_proxies.txt":
-        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ng", "user_proxies.txt")
+        file_path = os.path.join("ng", "user_proxies.txt")
+        if not os.path.exists(file_path):
+            file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ng", "user_proxies.txt")
     else:
         await update.message.reply_text("Invalid filename. Available files:\n- approved.txt\n- user_proxies.txt")
         return
