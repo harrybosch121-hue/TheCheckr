@@ -365,6 +365,17 @@ def _get_cached_warm_cookies(shop_url: str):
 def _store_warm_cookies(shop_url: str, cookies_dict: dict):
     with _WARM_CACHE_LOCK:
         _WARM_CACHE[shop_url] = {"cookies": cookies_dict, "ts": time.time()}
+        # Evict expired entries to prevent unbounded growth
+        if len(_WARM_CACHE) > 100:
+            now = time.time()
+            expired = [k for k, v in _WARM_CACHE.items() if (now - v["ts"]) >= _WARM_CACHE_TTL]
+            for k in expired:
+                _WARM_CACHE.pop(k, None)
+            # Hard cap: keep only 50 most recent if still too large
+            if len(_WARM_CACHE) > 100:
+                by_ts = sorted(_WARM_CACHE.items(), key=lambda x: x[1]["ts"])
+                for k, _ in by_ts[:len(by_ts) - 50]:
+                    _WARM_CACHE.pop(k, None)
 
 def warm_storefront_session(session, shop_url, variant_id=None):
     """Visit the storefront before checkout to build a realistic cookie/session profile.

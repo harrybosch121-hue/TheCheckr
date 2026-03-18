@@ -81,10 +81,10 @@ import json
 
 import st
 
-BOT_TOKEN = "8728871798:AAELNFyfofgSSGn6RDyIZ_XDhKRupxaKIdM"
+BOT_TOKEN = "8620322793:AAHhc77CEKTOOSnh_XWfvV0UBj45C96494E"
 
-GLOBAL_MAX_WORKERS = 500
-IO_MAX_WORKERS = 16
+GLOBAL_MAX_WORKERS = 64
+IO_MAX_WORKERS = 8
 GLOBAL_CHECKOUT_LIMIT = 48
 GLOBAL_ACTIVE_BATCH_LIMIT = 12
 STATS_FLUSH_MIN_CARDS = 25
@@ -362,7 +362,8 @@ def update_site_health(site_url: str, result_type: str):
                 site["health_score"] = max(0, min(100, success_rate - captcha_penalty - error_penalty))
             
             # Keep only last 10000 sites to prevent memory issues
-            if len(SITE_HEALTH) > 10000:
+            # Keep only last 200 sites to prevent memory bloat
+            if len(SITE_HEALTH) > 200:
                 # Remove oldest sites (by last activity)
                 sorted_sites = sorted(
                     SITE_HEALTH.items(),
@@ -372,8 +373,8 @@ def update_site_health(site_url: str, result_type: str):
                         x[1].get("last_error") or 0
                     )
                 )
-                # Keep only most recent 8000
-                sites_to_remove = [s[0] for s in sorted_sites[:2000]]
+                # Keep only most recent 150
+                sites_to_remove = [s[0] for s in sorted_sites[:len(sorted_sites) - 150]]
                 for s in sites_to_remove:
                     SITE_HEALTH.pop(s, None)
     
@@ -512,9 +513,9 @@ def log_proxy_error(proxy_url: str, error_type: str, error_msg: str, user_id: Op
                 "user_id": user_id,
                 "site": (site or "Unknown")[:200]  # Limit site length
             })
-            # Keep only last 50000 errors to prevent memory issues
-            if len(PROXY_ERROR_LOGS) > 50000:
-                PROXY_ERROR_LOGS[:] = PROXY_ERROR_LOGS[-50000:]
+            # Keep only last 500 errors to prevent memory bloat
+            if len(PROXY_ERROR_LOGS) > 500:
+                PROXY_ERROR_LOGS[:] = PROXY_ERROR_LOGS[-500:]
             
             # Debug logging for 429 errors to verify they're being logged
             if error_type == "429_Rate_Limit":
@@ -532,9 +533,9 @@ def log_site_removal(url: str, reason: str, user_id: Optional[int] = None):
                 "timestamp": time.time(),
                 "user_id": user_id
             })
-            # Keep only last 10000 removals to prevent memory issues
-            if len(REMOVAL_LOGS["sites"]) > 10000:
-                REMOVAL_LOGS["sites"] = REMOVAL_LOGS["sites"][-10000:]
+            # Keep only last 200 removals to prevent memory bloat
+            if len(REMOVAL_LOGS["sites"]) > 200:
+                REMOVAL_LOGS["sites"] = REMOVAL_LOGS["sites"][-200:]
     except Exception as e:
         logger.error(f"Error logging site removal: {e}")
 
@@ -548,9 +549,9 @@ def log_proxy_removal(proxy: str, reason: str, user_id: Optional[int] = None):
                 "timestamp": time.time(),
                 "user_id": user_id
             })
-            # Keep only last 10000 removals to prevent memory issues
-            if len(REMOVAL_LOGS["proxies"]) > 10000:
-                REMOVAL_LOGS["proxies"] = REMOVAL_LOGS["proxies"][-10000:]
+            # Keep only last 200 removals to prevent memory bloat
+            if len(REMOVAL_LOGS["proxies"]) > 200:
+                REMOVAL_LOGS["proxies"] = REMOVAL_LOGS["proxies"][-200:]
     except Exception as e:
         logger.error(f"Error logging proxy removal: {e}")
 
@@ -1206,6 +1207,7 @@ def check_single_card(card: Dict, sites: List[str], proxies_override: Optional[D
         try:
             shop_url = checkout.normalize_shop_url(site)
             site_label = format_site_label(shop_url)
+            session = None  # ensure defined for finally
             if isinstance(proxies_override, dict) and proxies_override:
                 proxies_mapping = proxies_override
                 try:
@@ -1889,6 +1891,15 @@ def check_single_card(card: Dict, sites: List[str], proxies_override: Optional[D
                 pass
             
             continue
+
+        finally:
+            # CRITICAL: close session to free TLS connection pool & memory
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                session = None
 
     # If we had a CAPTCHA error on any site, return that so it can be retried
     if last_captcha_code_display:
@@ -3506,6 +3517,24 @@ class BatchRunner:
         self._cleanup_aux_files()
         # ============ END CAPTCHA RETRY LOGIC ============
 
+        # ---- FREE BATCH MEMORY ----
+        # Release the cards list (can be huge for large batches)
+        # NOTE: done AFTER aux cleanup, before pending logic needs cards
+        # Clear any remaining retry tracking
+        self._clear_retry_tracking()
+        # Clear product cache to free per-batch allocations
+        try:
+            with BOT_PRODUCT_CACHE_LOCK:
+                BOT_PRODUCT_CACHE.clear()
+        except Exception:
+            pass
+        # Clear CAPTCHA cooldowns for finished sites
+        try:
+            with CAPTCHA_COOLDOWN_LOCK:
+                CAPTCHA_COOLDOWN.clear()
+        except Exception:
+            pass
+
         cancelled = False
         try:
             cancelled = self.cancel_event.is_set()
@@ -3524,6 +3553,10 @@ class BatchRunner:
                     logger.error(f"Failed to update pending batch: {e}")
         except Exception:
             pass
+
+        # Now safe to release cards (pending payload already built if needed)
+        self.cards = None
+        self.sites = None
 
         await self._flush_stats(update)
 
@@ -4333,7 +4366,7 @@ async def cmd_chkpr(update: Update, context: ContextTypes.DEFAULT_TYPE):
 GLOBAL_EXECUTOR = ThreadPoolExecutor(max_workers=GLOBAL_MAX_WORKERS)
 IO_EXECUTOR = ThreadPoolExecutor(max_workers=IO_MAX_WORKERS)
 SMALL_BATCH_THRESHOLD = 6
-SMALL_TASK_EXECUTOR = ThreadPoolExecutor(max_workers=12)  # Increased from 12 for faster small batches
+SMALL_TASK_EXECUTOR = ThreadPoolExecutor(max_workers=6)  # Small batches don't need many workers
 
 # ==== OPTIMIZATION: Cache for sites and file parsing ====
 SITES_CACHE = None

@@ -18,3 +18,14 @@
 💎 Charged 379185130397088|04|28|8739  |  SUCCESS  |  $7.29   | site : dentalmuseum |  tuff
 💎 Charged 5521159004751601|09|26|673  |  SUCCESS  |  $25.49   | site : genepro-inc |  tuff
 💎 Charged 4322071003797051|03|29|706  |  SUCCESS  |  ~$340.65   | site : apexcanvas |  tuff
+💎 Charged 4693080404916526|10|27|783  |  SUCCESS  |  $15.89   | site : goldstarchili |  tuff
+💎 Charged 4799689036905526|11|26|243  |  SUCCESS  |  $15.89   | site : goldstarchili |  tuff
+💎 Charged 5491862032041335|07|30|737  |  SUCCESS  |  $15.3   | site : goldstarchili |  tuff
+💎 Charged 5184830030052747|11|28|543  |  SUCCESS  |  $15.56   | site : goldstarchili |  tuff
+💎 Charged 5521152702918754|02|29|713  |  SUCCESS  |  $15.4   | site : goldstarchili |  tuff
+💎 Charged 4799689038366271|01|27|962  |  SUCCESS  |  $15.89   | site : goldstarchili |  tuff
+💎 Charged 4677853512149226|07|27|735  |  SUCCESS  |  $15.22   | site : goldstarchili |  tuff
+💎 Charged 4563773007432472|01|30|287  |  SUCCESS  |  $15.4   | site : goldstarchili |  tuff
+💎 Charged 5196032190544458|01|29|913  |  SUCCESS  |  $15.22   | site : goldstarchili |  tuff
+💎 Charged 5243120031361043|02|28|242  |  SUCCESS  |  $15.89   | site : goldstarchili |  tuff
+💎 Charged 4377660102101738|01|27|761  |  SUCCESS  |  $15.4   | site : goldstarchili |  tuff
