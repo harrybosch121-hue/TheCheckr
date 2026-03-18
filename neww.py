@@ -295,7 +295,7 @@ def create_session(shop_url, proxies=None):
     """
     fp = get_browser_fingerprint()
     
-    CHROME_IMPERSONATE_TARGETS = ["chrome133a", "chrome133", "chrome131", "chrome124"]
+    CHROME_IMPERSONATE_TARGETS = ["chrome131", "chrome124"]
     
     if USE_CURL_CFFI and curl_requests:
         impersonate_target = random.choice(CHROME_IMPERSONATE_TARGETS)
