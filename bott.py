@@ -28,6 +28,10 @@ from telegram.ext import (
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.getenv("DATA_DIR", "").strip()
 
+def _runtime_file_path(*parts: str) -> str:
+    base_dir = DATA_DIR or APP_DIR
+    return os.path.join(base_dir, *parts)
+
 def _prepare_runtime_data_dir() -> None:
     """Optionally move runtime files onto a persistent volume.
 
@@ -53,7 +57,7 @@ def _prepare_runtime_data_dir() -> None:
 
         for rel_path in seed_files:
             src = os.path.join(APP_DIR, rel_path)
-            dst = os.path.join(DATA_DIR, rel_path)
+            dst = _runtime_file_path(rel_path)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
 
             if os.path.exists(dst):
@@ -10454,15 +10458,41 @@ async def cmd_retrieve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /retrieve <filename>\n\nAvailable files:\n- approved.txt\n- user_proxies.txt")
         return
     
-    filename = args[0].lower()
+    raw_filename = " ".join(args).strip().lower()
+    normalized_name = raw_filename.replace("-", "_").replace(" ", "_")
+
+    approved_aliases = {"approved", "approved.txt"}
+    proxy_aliases = {
+        "user_proxies",
+        "user_proxies.txt",
+        "user_proxy",
+        "user_proxy.txt",
+        "proxies",
+        "proxies.txt",
+        "proxy",
+        "proxy.txt",
+        "user_procies",
+        "user_procies.txt",
+        "procies",
+        "procies.txt",
+    }
     
-    if filename == "approved.txt":
-        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approved.txt")
-    elif filename == "user_proxies.txt":
-        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ng", "user_proxies.txt")
+    if normalized_name in approved_aliases:
+        filename = "approved.txt"
+        file_path = _runtime_file_path("approved.txt")
+        fallback_path = os.path.join(APP_DIR, "approved.txt")
+    elif normalized_name in proxy_aliases:
+        filename = "user_proxies.txt"
+        file_path = _runtime_file_path("ng", "user_proxies.txt")
+        fallback_path = os.path.join(APP_DIR, "ng", "user_proxies.txt")
     else:
-        await update.message.reply_text("Invalid filename. Available files:\n- approved.txt\n- user_proxies.txt")
+        await update.message.reply_text(
+            "Invalid filename. Available files:\n- approved.txt\n- user_proxies.txt\n\nAliases:\n- approved\n- proxies\n- user_proxies\n- procies"
+        )
         return
+
+    if not os.path.exists(file_path) and os.path.exists(fallback_path):
+        file_path = fallback_path
     
     if not os.path.exists(file_path):
         await update.message.reply_text(f"File {filename} not found.")
