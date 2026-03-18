@@ -1054,8 +1054,8 @@ async def ensure_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
         if not allowed:
             await update.message.reply_text(
                 "Access restricted.\n\n"
-                "Join Group To Check: https://t.me/+l1aMGXxYLRYyZDZk\n\n"
-                "Owner: @LeVetche"
+                "Join Group To Check: https://t.me/+89lKTv0c4zNhOWY0\n\n"
+                "Owner: @aldorsi"
             )
             return False
             
@@ -1064,8 +1064,8 @@ async def ensure_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
         try:
             await update.effective_chat.send_message(
                 "Access restricted.\n\n"
-                "Join Group To Check: https://t.me/+l1aMGXxYLRYyZDZk\n\n"
-                "Owner: @LeVetche"
+                "Join Group To Check: https://t.me/+89lKTv0c4zNhOWY0\n\n"
+                "Owner: @aldorsi"
             )
         except Exception:
             pass

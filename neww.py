@@ -10,7 +10,7 @@ import sys
 import threading
 import hashlib
 
-USE_CURL_CFFI = False
+USE_CURL_CFFI = True
 try:
     from curl_cffi import requests as curl_requests
     USE_CURL_CFFI = True
