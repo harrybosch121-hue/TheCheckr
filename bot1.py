@@ -427,7 +427,7 @@ def progress_block(total: int, processed: int, approved: int, declined: int, cha
     result += (
         f" Time Elapsed : {elapsed:.2f}s ⏱️\n"
         f"━━━━━━━━━━━━━\n"
-        f"⌥ Dev: @LeVetche"
+        f"⌥ Dev: @aldorsi"
     )
     return result
 

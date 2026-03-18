@@ -2031,7 +2031,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /site — Show number of active sites\n"
         "• /me — Show your personal stats\n"
         "• /active — Show current active checks\n\n"
-        "⌥ Dev: @LeVetche\n"
+        "⌥ Dev: @aldorsi\n"
         "Join our GC for updates: https://t.me/+l1aMGXxYLRYyZDZk"
     )
 

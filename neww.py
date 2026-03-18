@@ -295,7 +295,7 @@ def create_session(shop_url, proxies=None):
     """
     fp = get_browser_fingerprint()
     
-    CHROME_IMPERSONATE_TARGETS = ["chrome131", "chrome124"]
+    CHROME_IMPERSONATE_TARGETS = ["chrome133a", "chrome133", "chrome131", "chrome124"]
     
     if USE_CURL_CFFI and curl_requests:
         impersonate_target = random.choice(CHROME_IMPERSONATE_TARGETS)
@@ -335,14 +335,6 @@ def create_session(shop_url, proxies=None):
     })
     
     return session
-
-def close_session(session) -> None:
-    try:
-        close_fn = getattr(session, "close", None)
-        if callable(close_fn):
-            close_fn()
-    except Exception:
-        pass
 
 # ── Session warming cache: warm once per site, reuse cookies for all cards ──
 _WARM_CACHE = {}          # {site_url: {"cookies": cookies_dict, "ts": timestamp}}
@@ -1636,6 +1628,7 @@ def step5_poll_receipt(session, checkout_token, checkout_session_token, receipt_
         return False, stub, _compose_poll_log_text()
 
     last_response = None
+    collected = []
     error_no_data_strikes = 0
 
     for attempt in range(1, POLL_RECEIPT_MAX_ATTEMPTS + 1):
@@ -1663,6 +1656,7 @@ def step5_poll_receipt(session, checkout_token, checkout_session_token, receipt_
                 except Exception:
                     attempt_blocks.append(f"from {ordinal(attempt)} PollForReceipt\n\n{str(response)}")
 
+            collected.append(response)
             last_response = response
 
             if isinstance(response, dict) and 'errors' in response and not response.get('data'):
@@ -3696,6 +3690,7 @@ def step5_poll_receipt_ctx(session, checkout_token, checkout_session_token, rece
         stub = {"_error": "INVALID_RECEIPT_ID_EXCEPTION"}
         return False, stub, _compose_poll_log_text()
     last_response = None
+    collected = []
     error_no_data_strikes = 0
     for attempt in range(1, POLL_RECEIPT_MAX_ATTEMPTS + 1):
         _log(f"  Polling {attempt}/{POLL_RECEIPT_MAX_ATTEMPTS}...")
@@ -3719,6 +3714,7 @@ def step5_poll_receipt_ctx(session, checkout_token, checkout_session_token, rece
                     attempt_blocks.append(f"from {ordinal(attempt)} PollForReceipt\n\n" + json.dumps(response, indent=2))
                 except Exception:
                     attempt_blocks.append(f"from {ordinal(attempt)} PollForReceipt\n\n{str(response)}")
+            collected.append(response)
             last_response = response
             if isinstance(response, dict) and 'errors' in response and not response.get('data'):
                 try:
