@@ -1214,6 +1214,8 @@ def check_single_card(card: Dict, sites: List[str], proxies_override: Optional[D
                     pass
             else:
                 proxies_mapping, used_proxy_url = checkout.get_next_proxy_mapping()
+            # Fresh fingerprint per checkout attempt – keeps TLS + headers unique
+            checkout.refresh_browser_fingerprint()
             session = checkout.create_session(shop_url, proxies=proxies_mapping)
 
             # Check for cancellation before product detection (can be slow)
@@ -1744,9 +1746,14 @@ def check_single_card(card: Dict, sites: List[str], proxies_override: Optional[D
                         last_captcha_site_label = site_label
                         print(f"  [DEBUG] CAPTCHA_REQUIRED detected - returning immediately (retry logic will handle it)")
                         
-                        # Immediately return CAPTCHA without trying other sites
-                        # The BatchRunner's retry logic will handle retrying with different sites
-                        return "unknown", code_display, "$0", site_label, used_proxy_url, None, None
+                        # Put this site into CAPTCHA cooldown so other cards avoid it
+                        try:
+                            update_site_health(shop_url, "captcha")
+                        except Exception:
+                            pass
+                        
+                        # Return with shop_url so BatchRunner can exclude it on retries
+                        return "unknown", code_display, "$0", site_label, used_proxy_url, shop_url, None
                 except Exception:
                     pass
                 try:
@@ -2293,9 +2300,9 @@ class BatchRunner:
                             site_display_val = f"{site_label} |  {display_name.strip()}"
                         logger.info(f"[DEBUG] Writing to approved.txt: {site_display_val}")
                         try:
-                            checkout.emit_summary_line(card, code_display, amount_display, site_display=site_display_val, force_persist=True)
+                            checkout.emit_summary_line(card, code_display, amount_display, site_display=site_display_val)
                         except TypeError:
-                            checkout.emit_summary_line(card, code_display, amount_display, force_persist=True)
+                            checkout.emit_summary_line(card, code_display, amount_display)
                 except Exception:
                     pass
                 
@@ -3149,9 +3156,9 @@ class BatchRunner:
                             site_display_val = f"{site_label} |  {display_name.strip()}"
                         logger.info(f"[DEBUG-RUN2] Writing to approved.txt: {site_display_val}")
                         try:
-                            checkout.emit_summary_line(card, code_display, amount_display, site_display=site_display_val, force_persist=True)
+                            checkout.emit_summary_line(card, code_display, amount_display, site_display=site_display_val)
                         except TypeError:
-                            checkout.emit_summary_line(card, code_display, amount_display, force_persist=True)
+                            checkout.emit_summary_line(card, code_display, amount_display)
                 except Exception:
                     pass
                 

