@@ -1183,6 +1183,7 @@ def check_single_card(card: Dict, sites: List[str], proxies_override: Optional[D
         used_proxy_url = None
     
     for site_idx, site in enumerate(ordered_sites):
+        session = None
         # Check for timeout (max 5 minutes per card)
         elapsed = time_module.time() - start_time
         if elapsed > 300:  # 5 minutes
@@ -1886,6 +1887,12 @@ def check_single_card(card: Dict, sites: List[str], proxies_override: Optional[D
                 pass
             
             continue
+        finally:
+            try:
+                if session is not None:
+                    checkout.close_session(session)
+            except Exception:
+                pass
 
     # If we had a CAPTCHA error on any site, return that so it can be retried
     if last_captcha_code_display:
@@ -1963,9 +1970,11 @@ class BatchRunner:
         self.captcha_retry_count: Dict[str, int] = {}  # Track retry count per card (by card number)
         self.captcha_max_retries = GLOBAL_CAPTCHA_MAX_RETRIES  # Max retries for CAPTCHA cards (-1 for infinite)
         self.captcha_excluded_sites: Dict[str, List[str]] = {}  # Track sites to exclude per card (by card number)
-        self.error_cards: List[Dict] = []  # Cards that failed after all retries
         self.captcha_mode = captcha_mode  # "NO_RETRY" or "WITH_RETRY"
-        self.captcha_no_retry_cards: List[Dict] = []  # Cards skipped in NO_RETRY mode
+        self.captcha_no_retry_count = 0
+        self.error_cards_count = 0
+        self.captcha_no_retry_file: Optional[str] = None
+        self.error_cards_file: Optional[str] = None
         self._stats_pending = {"tested": 0, "approved": 0, "charged": 0}
         self._stats_last_flush = time.time()
         self._source_skip = start_from if start_from > 0 else 0
@@ -2007,6 +2016,53 @@ class BatchRunner:
                 os.remove(self.card_file_path)
         except Exception:
             pass
+
+    def _make_aux_file_path(self, prefix: str) -> str:
+        ensure_uploads_dir()
+        safe_batch = str(self.batch_id).replace(":", "_")
+        return os.path.join(UPLOADS_DIR, f"{prefix}_{safe_batch}_{time.time_ns()}.txt")
+
+    def _append_text_line(self, file_path: str, line: str) -> None:
+        with open(file_path, "a", encoding="utf-8") as f:
+            f.write(line)
+            if not line.endswith("\n"):
+                f.write("\n")
+
+    def _record_captcha_no_retry_card(self, card: Dict) -> None:
+        if not self.captcha_no_retry_file:
+            self.captcha_no_retry_file = self._make_aux_file_path("captcha_required")
+        pan = card.get("number", "")
+        mm = card.get("month", "")
+        yy = card.get("year", "")
+        cvv = card.get("verification_value", "")
+        self._append_text_line(self.captcha_no_retry_file, f"{pan}|{mm}|{yy}|{cvv}")
+        self.captcha_no_retry_count += 1
+
+    def _record_error_card(self, card: Dict, code: str, site: str) -> None:
+        if not self.error_cards_file:
+            self.error_cards_file = self._make_aux_file_path("error_cards")
+        pan = card.get("number", "")
+        mm = card.get("month", "")
+        yy = card.get("year", "")
+        cvv = card.get("verification_value", "")
+        self._append_text_line(self.error_cards_file, f"{pan}|{mm}|{yy}|{cvv} | Error: {code or 'UNKNOWN'} | Site: {site or ''}")
+        self.error_cards_count += 1
+
+    def _clear_retry_tracking(self, card_number: str) -> None:
+        if not card_number:
+            return
+        self.captcha_retry_count.pop(card_number, None)
+        self.captcha_excluded_sites.pop(card_number, None)
+
+    def _cleanup_aux_files(self) -> None:
+        for path in (self.captcha_no_retry_file, self.error_cards_file):
+            if not path:
+                continue
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
     async def _flush_stats(self, update: Update):
         try:
@@ -2590,7 +2646,7 @@ class BatchRunner:
 
         worker_count = max(1, optimal_workers)
         card_queue: asyncio.Queue = asyncio.Queue(maxsize=max(16, worker_count * 2))
-        result_queue: asyncio.Queue = asyncio.Queue()
+        result_queue: asyncio.Queue = asyncio.Queue(maxsize=max(16, worker_count * 2))
         worker_done_marker = object()
 
         async def produce_cards():
@@ -2713,11 +2769,7 @@ class BatchRunner:
                     
                     # NO_RETRY mode: immediately add to captcha_no_retry_cards and skip
                     if self.captcha_mode == "NO_RETRY":
-                        self.captcha_no_retry_cards.append({
-                            "card": card,
-                            "code": code_display,
-                            "site": site_label
-                        })
+                        self._record_captcha_no_retry_card(card)
                         logger.info(f"[CAPTCHA NO_RETRY] Card {card_number[-4:]} skipped (CAPTCHA_REQUIRED), will show at end")
                         async with self.lock:
                             self.processed += 1
@@ -2748,11 +2800,8 @@ class BatchRunner:
                         continue
                     else:
                         # Max retries reached, add to error cards
-                        self.error_cards.append({
-                            "card": card,
-                            "code": code_display,
-                            "site": site_label
-                        })
+                        self._record_error_card(card, code_display, site_label)
+                        self._clear_retry_tracking(card_number)
                         logger.info(f"[CAPTCHA] Card {card_number[-4:]} max retries reached, added to error cards")
                         # Don't send declined notification, will be sent as file at end
                         async with self.lock:
@@ -3234,92 +3283,135 @@ class BatchRunner:
                         logger.error(f"Error retrying card: {e}")
                         return retry_card, ("unknown", f"RETRY_ERROR: {str(e)[:50]}", "$0", "", None, None, None)
 
-            # Process retries
-            retry_tasks = [asyncio.create_task(retry_one_card(c)) for c in self.captcha_retry_cards]
-            self.captcha_retry_cards = []  # Clear the retry queue
+            async def handle_retry_result(retry_card: Dict, result, pass_label: str):
+                if len(result) >= 7:
+                    r_status, r_code, r_amount, r_site, r_proxy, r_url, r_receipt = result
+                elif len(result) >= 6:
+                    r_status, r_code, r_amount, r_site, r_proxy, r_url = result
+                    r_receipt = None
+                else:
+                    r_status, r_code, r_amount, r_site = result[:4] if len(result) >= 4 else ("unknown", "", "$0", "")
+                    r_proxy, r_url, r_receipt = None, None, None
 
-            for t in asyncio.as_completed(retry_tasks):
+                r_code_upper = (r_code or "").upper()
+                is_still_captcha = "CAPTCHA_REQUIRED" in r_code_upper or "CAPTCHA" in r_code_upper
+
+                card_number = str(retry_card.get("number", ""))
+                retry_num = self.captcha_retry_count.get(card_number, 0)
+                max_retries_display = "∞" if self.captcha_max_retries == -1 else str(self.captcha_max_retries)
+                new_retry_count = retry_num + 1
+                should_retry_again = (self.captcha_max_retries == -1) or (new_retry_count <= self.captcha_max_retries)
+
+                if is_still_captcha and should_retry_again:
+                    if r_url:
+                        if card_number not in self.captcha_excluded_sites:
+                            self.captcha_excluded_sites[card_number] = []
+                        if r_url not in self.captcha_excluded_sites[card_number]:
+                            self.captcha_excluded_sites[card_number].append(r_url)
+                            logger.info(f"[CAPTCHA RETRY] Excluding site {r_url} for card {card_number[-4:]} on next retry")
+                    self.captcha_retry_cards.append(retry_card)
+                    self.captcha_retry_count[card_number] = new_retry_count
+                    logger.info(f"{pass_label}: CAPTCHA still present for card {card_number[-4:]}, queued again ({new_retry_count}/{max_retries_display})")
+                    return
+
+                if is_still_captcha:
+                    self._record_error_card(retry_card, r_code, r_site)
+                    self._clear_retry_tracking(card_number)
+                    async with self.lock:
+                        self.processed += 1
+                    logger.info(f"{pass_label}: CAPTCHA max retries for card {card_number[-4:]}, added to error list")
+                    return
+
+                self._clear_retry_tracking(card_number)
+                async with self.lock:
+                    if r_status == "charged":
+                        self.charged += 1
+                    elif r_status == "approved":
+                        self.approved += 1
+                    elif r_status == "declined":
+                        self.declined += 1
+                    self.processed += 1
+                await self._queue_stats_update(update, r_status)
+
+                if r_status in ("approved", "charged"):
+                    try:
+                        display_name = None
+                        user_id = None
+                        try:
+                            user = update.effective_user
+                            user_id = user.id
+                            display_name = (user.full_name or "").strip()
+                            if not display_name:
+                                uname = (user.username or "").strip()
+                                display_name = uname if uname else str(user.id)
+                        except Exception:
+                            pass
+                        notify_text = result_notify_text(retry_card, r_status, r_code, r_amount, r_site, display_name, r_receipt, user_id)
+                        await update.effective_chat.send_message(
+                            text=notify_text,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as e:
+                        logger.error(f"Error sending retry notification: {e}")
+
+            async def process_retry_pass(cards_to_process: List[Dict], pass_label: str):
+                if not cards_to_process:
+                    return
+
+                retry_worker_count = max(1, min(5, len(cards_to_process)))
+                retry_card_queue: asyncio.Queue = asyncio.Queue(maxsize=max(8, retry_worker_count * 2))
+                retry_result_queue: asyncio.Queue = asyncio.Queue(maxsize=max(8, retry_worker_count * 2))
+                retry_done_marker = object()
+
+                async def retry_producer():
+                    try:
+                        for retry_card in cards_to_process:
+                            if self.cancel_event.is_set() or self.paused_for_proxies:
+                                break
+                            await retry_card_queue.put(retry_card)
+                    finally:
+                        for _ in range(retry_worker_count):
+                            await retry_card_queue.put(retry_done_marker)
+
+                async def retry_worker_loop():
+                    while True:
+                        retry_card = await retry_card_queue.get()
+                        if retry_card is retry_done_marker:
+                            await retry_result_queue.put(retry_done_marker)
+                            return
+                        result = await retry_one_card(retry_card)
+                        await retry_result_queue.put(result)
+
+                producer_task = asyncio.create_task(retry_producer())
+                retry_workers = [asyncio.create_task(retry_worker_loop()) for _ in range(retry_worker_count)]
+                retry_tasks = [producer_task, *retry_workers]
+
                 try:
-                    retry_card, result = await t
-                    if len(result) >= 7:
-                        r_status, r_code, r_amount, r_site, r_proxy, r_url, r_receipt = result
-                    elif len(result) >= 6:
-                        r_status, r_code, r_amount, r_site, r_proxy, r_url = result
-                        r_receipt = None
-                    else:
-                        r_status, r_code, r_amount, r_site = result[:4] if len(result) >= 4 else ("unknown", "", "$0", "")
-                        r_proxy, r_url, r_receipt = None, None, None
+                    completed_retry_workers = 0
+                    while completed_retry_workers < retry_worker_count:
+                        item = await retry_result_queue.get()
+                        if item is retry_done_marker:
+                            completed_retry_workers += 1
+                            continue
+                        retry_card, result = item
+                        try:
+                            await handle_retry_result(retry_card, result, pass_label)
+                        except Exception as e:
+                            logger.error(f"Error processing retry result: {e}")
+                finally:
+                    for task in retry_tasks:
+                        if not task.done():
+                            task.cancel()
+                    try:
+                        await asyncio.gather(*retry_tasks, return_exceptions=True)
+                    except Exception:
+                        pass
 
-                    # Check if still CAPTCHA error
-                    r_code_upper = (r_code or "").upper()
-                    is_still_captcha = "CAPTCHA_REQUIRED" in r_code_upper or "CAPTCHA" in r_code_upper
-
-                    card_number = str(retry_card.get("number", ""))
-                    retry_num = self.captcha_retry_count.get(card_number, 0)
-                    max_retries_display = "∞" if self.captcha_max_retries == -1 else str(self.captcha_max_retries)
-
-                    # Increment retry count first
-                    new_retry_count = retry_num + 1
-                    # If max_retries is -1 (infinite), always retry; otherwise check NEW count
-                    should_retry_again = (self.captcha_max_retries == -1) or (new_retry_count <= self.captcha_max_retries)
-                    
-                    if is_still_captcha and should_retry_again:
-                        # Track the site that gave CAPTCHA for exclusion on next retry
-                        if r_url:
-                            if card_number not in self.captcha_excluded_sites:
-                                self.captcha_excluded_sites[card_number] = []
-                            if r_url not in self.captcha_excluded_sites[card_number]:
-                                self.captcha_excluded_sites[card_number].append(r_url)
-                                logger.info(f"[CAPTCHA RETRY] Excluding site {r_url} for card {card_number[-4:]} on next retry")
-                        # Queue for another retry
-                        self.captcha_retry_cards.append(retry_card)
-                        self.captcha_retry_count[card_number] = new_retry_count
-                        logger.info(f"CAPTCHA still present for card {card_number[-4:]}, queued again ({new_retry_count}/{max_retries_display})")
-                    elif is_still_captcha:
-                        # Max retries reached, add to error cards
-                        self.error_cards.append({
-                            "card": retry_card,
-                            "code": r_code,
-                            "site": r_site
-                        })
-                        async with self.lock:
-                            self.processed += 1
-                        logger.info(f"CAPTCHA max retries for card {card_number[-4:]}, added to error list")
-                    else:
-                        # Got a definitive result
-                        async with self.lock:
-                            if r_status == "charged":
-                                self.charged += 1
-                            elif r_status == "approved":
-                                self.approved += 1
-                            elif r_status == "declined":
-                                self.declined += 1
-                            self.processed += 1
-
-                        # Send notification for approved/charged
-                        if r_status in ("approved", "charged"):
-                            try:
-                                display_name = None
-                                user_id = None
-                                try:
-                                    user = update.effective_user
-                                    user_id = user.id
-                                    display_name = (user.full_name or "").strip()
-                                    if not display_name:
-                                        uname = (user.username or "").strip()
-                                        display_name = uname if uname else str(user.id)
-                                except Exception:
-                                    pass
-                                notify_text = result_notify_text(retry_card, r_status, r_code, r_amount, r_site, display_name, r_receipt, user_id)
-                                await update.effective_chat.send_message(
-                                    text=notify_text,
-                                    parse_mode=ParseMode.HTML,
-                                    disable_web_page_preview=True,
-                                )
-                            except Exception as e:
-                                logger.error(f"Error sending retry notification: {e}")
-                except Exception as e:
-                    logger.error(f"Error processing retry result: {e}")
+            # Process retries
+            first_retry_cards = list(self.captcha_retry_cards)
+            self.captcha_retry_cards = []
+            await process_retry_pass(first_retry_cards, "[CAPTCHA RETRY]")
 
             # Continue retrying while there are cards in queue (respects max_retries limit)
             # Convert to while loop for infinite retries or until max retries exhausted
@@ -3339,11 +3431,8 @@ class BatchRunner:
                             logger.info(f"[RETRY FILTER] Card {card_number[-4:]} allowed for retry")
                         else:
                             # Exceeded max retries
-                            self.error_cards.append({
-                                "card": card,
-                                "code": "CAPTCHA_REQUIRED",
-                                "site": ""
-                            })
+                            self._record_error_card(card, "CAPTCHA_REQUIRED", "")
+                            self._clear_retry_tracking(card_number)
                             async with self.lock:
                                 self.processed += 1
                             logger.info(f"[RETRY FILTER] Card {card_number[-4:]} exceeded max retries (attempted {current_count}, max={self.captcha_max_retries}), added to error cards")
@@ -3354,145 +3443,40 @@ class BatchRunner:
                     self.captcha_retry_cards = cards_to_retry
                 
                 logger.info(f"Retry pass for {len(self.captcha_retry_cards)} cards...")
-                retry_tasks_2 = [asyncio.create_task(retry_one_card(c)) for c in self.captcha_retry_cards]
+                next_retry_cards = list(self.captcha_retry_cards)
                 self.captcha_retry_cards = []
-
-                for t in asyncio.as_completed(retry_tasks_2):
-                    try:
-                        retry_card, result = await t
-                        if len(result) >= 7:
-                            r_status, r_code, r_amount, r_site, r_proxy, r_url, r_receipt = result
-                        elif len(result) >= 6:
-                            r_status, r_code, r_amount, r_site, r_proxy, r_url = result
-                            r_receipt = None
-                        else:
-                            r_status, r_code, r_amount, r_site = result[:4] if len(result) >= 4 else ("unknown", "", "$0", "")
-                            r_proxy, r_url, r_receipt = None, None, None
-
-                        r_code_upper = (r_code or "").upper()
-                        is_still_captcha = "CAPTCHA_REQUIRED" in r_code_upper or "CAPTCHA" in r_code_upper
-                        card_number = str(retry_card.get("number", ""))
-                        retry_num = self.captcha_retry_count.get(card_number, 0)
-                        max_retries_display = "∞" if self.captcha_max_retries == -1 else str(self.captcha_max_retries)
-                        
-                        # Increment retry count first
-                        new_retry_count = retry_num + 1
-                        # If max_retries is -1 (infinite), always retry; otherwise check NEW count
-                        should_retry_again = (self.captcha_max_retries == -1) or (new_retry_count <= self.captcha_max_retries)
-                        
-                        if is_still_captcha and should_retry_again:
-                            # Track site for exclusion
-                            if r_url:
-                                if card_number not in self.captcha_excluded_sites:
-                                    self.captcha_excluded_sites[card_number] = []
-                                if r_url not in self.captcha_excluded_sites[card_number]:
-                                    self.captcha_excluded_sites[card_number].append(r_url)
-                            # Add back to retry queue
-                            self.captcha_retry_cards.append(retry_card)
-                            self.captcha_retry_count[card_number] = new_retry_count
-                            logger.info(f"CAPTCHA still present for card {card_number[-4:]}, queued again ({new_retry_count}/{max_retries_display})")
-                        elif is_still_captcha:
-                            # Max retries reached
-                            self.error_cards.append({
-                                "card": retry_card,
-                                "code": r_code,
-                                "site": r_site
-                            })
-                            async with self.lock:
-                                self.processed += 1
-                            logger.info(f"Final CAPTCHA failure for card {card_number[-4:]} after {retry_num} retries")
-                        else:
-                            async with self.lock:
-                                if r_status == "charged":
-                                    self.charged += 1
-                                elif r_status == "approved":
-                                    self.approved += 1
-                                elif r_status == "declined":
-                                    self.declined += 1
-                                self.processed += 1
-                            await self._queue_stats_update(update, r_status)
-
-                            if r_status in ("approved", "charged"):
-                                try:
-                                    display_name = None
-                                    user_id = None
-                                    try:
-                                        user = update.effective_user
-                                        user_id = user.id
-                                        display_name = (user.full_name or "").strip()
-                                    except Exception:
-                                        pass
-                                    notify_text = result_notify_text(retry_card, r_status, r_code, r_amount, r_site, display_name, r_receipt, user_id)
-                                    await update.effective_chat.send_message(
-                                        text=notify_text,
-                                        parse_mode=ParseMode.HTML,
-                                        disable_web_page_preview=True,
-                                    )
-                                except Exception as e:
-                                    logger.error(f"Error sending retry notification: {e}")
-                    except Exception as e:
-                        logger.error(f"Error processing retry: {e}")
+                await process_retry_pass(next_retry_cards, "[RETRY LOOP]")
 
         # Send captcha_no_retry_cards if in NO_RETRY mode
-        if self.captcha_mode == "NO_RETRY" and self.captcha_no_retry_cards:
+        if self.captcha_mode == "NO_RETRY" and self.captcha_no_retry_count and self.captcha_no_retry_file:
             try:
-                captcha_lines = []
-                for item in self.captcha_no_retry_cards:
-                    card = item.get("card", {})
-                    pan = card.get("number", "")
-                    mm = card.get("month", "")
-                    yy = card.get("year", "")
-                    cvv = card.get("verification_value", "")
-                    captcha_lines.append(f"{pan}|{mm}|{yy}|{cvv}")
-
-                captcha_content = "\n".join(captcha_lines)
-                captcha_filename = f"captcha_required_{self.batch_id.replace(':', '_')}_{int(time.time())}.txt"
-
-                captcha_file = io.BytesIO(captcha_content.encode("utf-8"))
-                captcha_file.name = captcha_filename
-
-                await update.effective_chat.send_document(
-                    document=captcha_file,
-                    filename=captcha_filename,
-                    caption=f"⚠️ <b>{len(self.captcha_no_retry_cards)} cards with CAPTCHA_REQUIRED (skipped in NO_RETRY mode)</b>",
-                    parse_mode=ParseMode.HTML
-                )
-                logger.info(f"Sent {len(self.captcha_no_retry_cards)} CAPTCHA cards file to user")
+                with open(self.captcha_no_retry_file, "rb") as captcha_file:
+                    await update.effective_chat.send_document(
+                        document=captcha_file,
+                        filename=os.path.basename(self.captcha_no_retry_file),
+                        caption=f"⚠️ <b>{self.captcha_no_retry_count} cards with CAPTCHA_REQUIRED (skipped in NO_RETRY mode)</b>",
+                        parse_mode=ParseMode.HTML
+                    )
+                logger.info(f"Sent {self.captcha_no_retry_count} CAPTCHA cards file to user")
             except Exception as e:
                 logger.error(f"Failed to send captcha_no_retry_cards file: {e}")
 
         # Send error cards as a txt file if any
-        if self.error_cards:
+        if self.error_cards_count and self.error_cards_file:
             try:
-                error_lines = []
-                for err in self.error_cards:
-                    card = err.get("card", {})
-                    pan = card.get("number", "")
-                    mm = card.get("month", "")
-                    yy = card.get("year", "")
-                    cvv = card.get("verification_value", "")
-                    code = err.get("code", "UNKNOWN")
-                    site = err.get("site", "")
-                    error_lines.append(f"{pan}|{mm}|{yy}|{cvv} | Error: {code} | Site: {site}")
-
-                error_content = "\n".join(error_lines)
-                error_filename = f"error_cards_{self.batch_id.replace(':', '_')}_{int(time.time())}.txt"
-
-                error_file = io.BytesIO(error_content.encode("utf-8"))
-                error_file.name = error_filename
-
-                await update.effective_chat.send_document(
-                    document=error_file,
-                    filename=error_filename,
-                    caption=f"❌ <b>{len(self.error_cards)} cards failed with CAPTCHA errors after {self.captcha_max_retries} retries</b>",
-                    parse_mode=ParseMode.HTML
-                )
-                logger.info(f"Sent error cards file with {len(self.error_cards)} cards")
+                with open(self.error_cards_file, "rb") as error_file:
+                    await update.effective_chat.send_document(
+                        document=error_file,
+                        filename=os.path.basename(self.error_cards_file),
+                        caption=f"❌ <b>{self.error_cards_count} cards failed with CAPTCHA errors after {self.captcha_max_retries} retries</b>",
+                        parse_mode=ParseMode.HTML
+                    )
+                logger.info(f"Sent error cards file with {self.error_cards_count} cards")
             except Exception as e:
                 logger.error(f"Error sending error cards file: {e}")
                 try:
                     await update.effective_chat.send_message(
-                        f"❌ <b>{len(self.error_cards)} cards failed with CAPTCHA errors</b>\n\n"
+                        f"❌ <b>{self.error_cards_count} cards failed with CAPTCHA errors</b>\n\n"
                         f"Could not send file: {str(e)[:100]}",
                         parse_mode=ParseMode.HTML
                     )
@@ -3520,6 +3504,7 @@ class BatchRunner:
             pass
 
         await self._flush_stats(update)
+        self._cleanup_aux_files()
 
         try:
             if hasattr(progress_msg, 'chat_id') and hasattr(progress_msg, 'message_id'):
