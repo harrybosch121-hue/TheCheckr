@@ -1294,6 +1294,28 @@ def check_single_card(card: Dict, sites: List[str], proxies_override: Optional[D
                         else:
                             logger.warning(f"Site {shop_url} returned status {test_response.status_code}")
                             is_proxy_issue = False
+                            # Auto-remove sites returning 429 (rate-limited / blocked)
+                            if test_response.status_code == 429:
+                                try:
+                                    checkout.remove_site_from_working_sites(shop_url)
+                                    reason = f"HTTP 429 - Rate limited / blocked during product detection"
+                                    log_site_removal(shop_url, reason)
+                                    logger.info(f"Removed site {shop_url} from working_sites.txt due to 429")
+                                    print(f"[DEBUG] Product detection - Site {shop_url} removed (429 rate limited)")
+                                except Exception as e:
+                                    logger.error(f"Failed to remove 429 site {shop_url}: {e}")
+                                try:
+                                    with BOT_PRODUCT_CACHE_LOCK:
+                                        if shop_url in site_product_cache:
+                                            del site_product_cache[shop_url]
+                                except Exception:
+                                    pass
+                                try:
+                                    normalized_target = checkout.normalize_shop_url(shop_url).rstrip("/")
+                                    ordered_sites = [s for s in ordered_sites if checkout.normalize_shop_url(s).rstrip("/") != normalized_target]
+                                except Exception:
+                                    pass
+                                continue  # Skip to next site
                     except Exception as e:
                         err_msg = str(e).lower()
                         if any(sig in err_msg for sig in ["connection", "proxy", "tunnel", "timeout"]):
