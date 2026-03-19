@@ -1682,7 +1682,6 @@ def step5_poll_receipt(session, checkout_token, checkout_session_token, receipt_
         return False, stub, _compose_poll_log_text()
 
     last_response = None
-    collected = []
     error_no_data_strikes = 0
 
     for attempt in range(1, POLL_RECEIPT_MAX_ATTEMPTS + 1):
@@ -1710,7 +1709,6 @@ def step5_poll_receipt(session, checkout_token, checkout_session_token, receipt_
                 except Exception:
                     attempt_blocks.append(f"from {ordinal(attempt)} PollForReceipt\n\n{str(response)}")
 
-            collected.append(response)
             last_response = response
 
             if isinstance(response, dict) and 'errors' in response and not response.get('data'):
@@ -3744,7 +3742,6 @@ def step5_poll_receipt_ctx(session, checkout_token, checkout_session_token, rece
         stub = {"_error": "INVALID_RECEIPT_ID_EXCEPTION"}
         return False, stub, _compose_poll_log_text()
     last_response = None
-    collected = []
     error_no_data_strikes = 0
     for attempt in range(1, POLL_RECEIPT_MAX_ATTEMPTS + 1):
         _log(f"  Polling {attempt}/{POLL_RECEIPT_MAX_ATTEMPTS}...")
@@ -3768,7 +3765,6 @@ def step5_poll_receipt_ctx(session, checkout_token, checkout_session_token, rece
                     attempt_blocks.append(f"from {ordinal(attempt)} PollForReceipt\n\n" + json.dumps(response, indent=2))
                 except Exception:
                     attempt_blocks.append(f"from {ordinal(attempt)} PollForReceipt\n\n{str(response)}")
-            collected.append(response)
             last_response = response
             if isinstance(response, dict) and 'errors' in response and not response.get('data'):
                 try:
@@ -3884,12 +3880,21 @@ def process_card(idx, card, sites, site_product_cache):
         except Exception:
             pass
         site_skipped = False
+        _prev_session = None
         while attempts < max_attempts and not worked and not site_skipped:
+            # Close previous iteration's session to prevent leaks
+            if _prev_session is not None:
+                try:
+                    _prev_session.close()
+                except Exception:
+                    pass
+                _prev_session = None
             attempts += 1
             attempt_start_time = time.time()
             print(f"[INFO] {ordinal(idx)} CC, {ordinal(site_attempt)} site -> proxy attempt {attempts}/{max_attempts}")
             proxies_mapping, used_proxy_url = get_next_proxy_mapping()
             session = create_session(shop_url, proxies=proxies_mapping)
+            _prev_session = session
             with PRODUCT_CACHE_LOCK:
                 cached = site_product_cache.get(shop_url)
             if cached:
@@ -4055,6 +4060,13 @@ def process_card(idx, card, sites, site_product_cache):
                         break
                 except Exception:
                     pass
+        # Close last session from the while loop
+        if _prev_session is not None:
+            try:
+                _prev_session.close()
+            except Exception:
+                pass
+            _prev_session = None
         if skip_cc_due_to_unknown or stop_cc_due_to_terminal or stop_cc_after_result:
             break
         if not worked and not site_skipped:
@@ -4090,7 +4102,7 @@ def main():
             try:
                 time.sleep(random.uniform(PARALLEL_START_STAGGER_MIN_MS, PARALLEL_START_STAGGER_MAX_MS) / 1000.0)
             except Exception:
-                pass
+                passDarkForums.st
             futures.append(executor.submit(process_card, idx, card, sites, site_product_cache))
         for f in futures:
             try:

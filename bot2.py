@@ -31,7 +31,7 @@ import neww as checkout
 import t2
 
 # ====== CONFIG ======
-BOT_TOKEN = "8397130185:AAE4X458pa6FQWIR_MvA_N7FJJ0ztd7N02k"
+BOT_TOKEN = "8728871798:AAELNFyfofgSSGn6RDyIZ_XDhKRupxaKIdM"
 
 # Shared thread pool sized to support ~30 concurrent users with higher per-batch concurrency
 # Each batch limits itself to BATCH_WORKERS threads.
@@ -126,6 +126,15 @@ async def add_pending(batch_id: str, payload: Dict) -> None:
         except Exception:
             data[str(batch_id)] = {}
         _save_pending(data)
+
+async def update_pending_progress(batch_id: str, processed: int) -> None:
+    """Update the processed count for a pending batch so restarts resume from the right place."""
+    with PENDING_LOCK:
+        data = _load_pending()
+        bid = str(batch_id)
+        if bid in data:
+            data[bid]["processed"] = processed
+            _save_pending(data)
 
 async def remove_pending(batch_id: str) -> None:
     with PENDING_LOCK:
@@ -1276,6 +1285,13 @@ class BatchRunner:
                     # Count "unknown" status as declined to ensure accurate counting
                     self.declined += 1
 
+                # Persist progress every 50 cards so restarts resume near where we left off
+                if self.processed % 50 == 0:
+                    try:
+                        await update_pending_progress(self.batch_id, self.processed)
+                    except Exception:
+                        pass
+
                 # Proxy health monitoring:
                 try:
                     # When using rotating proxies_list, track per-proxy UNKNOWNs and remove dead ones
@@ -1631,6 +1647,13 @@ class BatchRunner:
                 else:
                     # Count "unknown" status as declined to ensure accurate counting
                     self.declined += 1
+
+                # Persist progress every 50 cards so restarts resume near where we left off
+                if self.processed % 50 == 0:
+                    try:
+                        await update_pending_progress(self.batch_id, self.processed)
+                    except Exception:
+                        pass
 
                 # Proxy health monitoring:
                 try:
@@ -3752,53 +3775,64 @@ async def cmd_retrieve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Usage: /retrieve <filename>
     Example: /retrieve approved.txt
     """
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("Unauthorized.")
-        return
-
-    args = context.args or []
-    if not args:
-        file_list = "\n".join(f"• {name}" for name in sorted(RETRIEVABLE_FILES.keys()))
-        await update.message.reply_text(
-            f"Usage: /retrieve <filename>\n\nAvailable files:\n{file_list}"
-        )
-        return
-
-    requested = args[0].strip()
-    # Allow matching by key name or full path
-    file_path = RETRIEVABLE_FILES.get(requested)
-    if not file_path:
-        # Try matching by basename of the values
-        for key, path in RETRIEVABLE_FILES.items():
-            if os.path.basename(path) == requested or path == requested:
-                file_path = path
-                break
-    if not file_path:
-        file_list = "\n".join(f"• {name}" for name in sorted(RETRIEVABLE_FILES.keys()))
-        await update.message.reply_text(
-            f"Unknown file: {requested}\n\nAvailable files:\n{file_list}"
-        )
-        return
-
-    if not os.path.exists(file_path):
-        await update.message.reply_text(f"File not found on server: {file_path}")
-        return
-
     try:
-        file_size = os.path.getsize(file_path)
-        if file_size == 0:
-            await update.message.reply_text(f"{requested} exists but is empty (0 bytes).")
+        chat = update.effective_chat
+        user = update.effective_user
+        if not user or not is_admin(user.id):
+            if chat:
+                await chat.send_message("Unauthorized.")
             return
 
-        with open(file_path, "rb") as f:
-            await update.message.reply_document(
-                document=f,
-                filename=os.path.basename(file_path),
-                caption=f"📁 {requested} ({file_size:,} bytes)",
+        args = context.args or []
+        if not args:
+            file_list = "\n".join(f"• {name}" for name in sorted(RETRIEVABLE_FILES.keys()))
+            await chat.send_message(
+                f"Usage: /retrieve <filename>\n\nAvailable files:\n{file_list}"
             )
+            return
+
+        requested = args[0].strip()
+        # Allow matching by key name or full path
+        file_path = RETRIEVABLE_FILES.get(requested)
+        if not file_path:
+            # Try matching by basename of the values
+            for key, path in RETRIEVABLE_FILES.items():
+                if os.path.basename(path) == requested or path == requested:
+                    file_path = path
+                    break
+        if not file_path:
+            file_list = "\n".join(f"• {name}" for name in sorted(RETRIEVABLE_FILES.keys()))
+            await chat.send_message(
+                f"Unknown file: {requested}\n\nAvailable files:\n{file_list}"
+            )
+            return
+
+        if not os.path.exists(file_path):
+            await chat.send_message(f"File not found on server: {file_path}")
+            return
+
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            await chat.send_message(f"{requested} exists but is empty (0 bytes).")
+            return
+
+        # Read file into memory buffer to avoid file handle issues
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+
+        await chat.send_document(
+            document=file_bytes,
+            filename=os.path.basename(file_path),
+            caption=f"📁 {requested} ({file_size:,} bytes)",
+        )
     except Exception as e:
-        await update.message.reply_text(f"Failed to send file: {e}")
+        try:
+            logger.error(f"/retrieve error: {e}")
+            chat = update.effective_chat
+            if chat:
+                await chat.send_message(f"Failed to send file: {e}")
+        except Exception:
+            pass
 
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):

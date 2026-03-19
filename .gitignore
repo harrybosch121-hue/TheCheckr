@@ -11,7 +11,8 @@ build/
 approved.txt
 approve.txt
 user_stats.json
-pending_batches.json
+# NOTE: pending_batches.json is NOT ignored — it must be in the repo
+# so Railway can resume batches after redeploy. The bot updates it at runtime.
 
 # User uploads (generated at runtime)
 uploads/

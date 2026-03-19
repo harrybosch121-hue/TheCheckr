@@ -84,8 +84,8 @@ import st
 
 BOT_TOKEN = "8728871798:AAELNFyfofgSSGn6RDyIZ_XDhKRupxaKIdM"
 
-GLOBAL_MAX_WORKERS = 64
-IO_MAX_WORKERS = 8
+GLOBAL_MAX_WORKERS = 30
+IO_MAX_WORKERS = 6
 GLOBAL_CHECKOUT_LIMIT = 48
 GLOBAL_ACTIVE_BATCH_LIMIT = 12
 STATS_FLUSH_MIN_CARDS = 25
@@ -202,6 +202,7 @@ load_user_agents()
 
 BOT_PRODUCT_CACHE: Dict[str, Tuple[str, str, str, str]] = {}
 BOT_PRODUCT_CACHE_LOCK = threading.Lock()
+BOT_PRODUCT_CACHE_MAX = 200  # Cap cache size to prevent unbounded memory growth
 
 # Removal logging system
 REMOVAL_LOGS: Dict[str, List[Dict]] = {
@@ -1236,6 +1237,15 @@ def check_single_card(card: Dict, sites: List[str], proxies_override: Optional[D
                 product_id, variant_id, price, title = checkout.auto_detect_cheapest_product(session, shop_url)
                 if variant_id:
                     with BOT_PRODUCT_CACHE_LOCK:
+                        # Cap cache size to prevent unbounded growth
+                        if len(site_product_cache) >= BOT_PRODUCT_CACHE_MAX:
+                            try:
+                                # Remove oldest ~25% of entries
+                                keys = list(site_product_cache.keys())
+                                for k in keys[:len(keys) // 4]:
+                                    site_product_cache.pop(k, None)
+                            except Exception:
+                                pass
                         site_product_cache[shop_url] = (product_id, variant_id, price, title)
                     if runner:
                         try:
@@ -9350,6 +9360,12 @@ async def cmd_achk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Store results in ACHK_PENDING and ask for amount
     try:
         async with ACHK_LOCK:
+            # Evict stale entries older than 30 minutes
+            _now = time.time()
+            _stale = [uid for uid, d in ACHK_PENDING.items()
+                      if _now - d.get("_ts", 0) > 1800]
+            for uid in _stale:
+                ACHK_PENDING.pop(uid, None)
             ACHK_PENDING[user.id] = {
                 "results": results,
                 "total_urls": total_urls,
@@ -9358,7 +9374,8 @@ async def cmd_achk(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "no_products": no_products,
                 "failed": failed,
                 "cancelled": cancelled,
-                "was_cancelled": was_cancelled
+                "was_cancelled": was_cancelled,
+                "_ts": _now,
             }
     except Exception:
         pass
