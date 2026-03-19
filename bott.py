@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 import shutil
+import signal
 from datetime import datetime
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1972,6 +1973,7 @@ class BatchRunner:
             self.progress_update_interval = 5.0  # Very large batches: update every 5s to reduce API overhead
         self.paused_for_proxies = False
         self._pending_save_lock = asyncio.Lock()  # Lock to prevent duplicate pending saves
+        self._last_checkpoint = 0  # last processed count when we saved to pending
         # CAPTCHA retry tracking - cards that get CAPTCHA_REQUIRED will be retried at the end
         self.captcha_retry_cards: List[Dict] = []  # Cards to retry due to CAPTCHA
         self.captcha_retry_count: Dict[str, int] = {}  # Track retry count per card (by card number)
@@ -2694,6 +2696,7 @@ class BatchRunner:
                     "user_name": ((getattr(update.effective_user, "full_name", None) or "").strip() or str(self.user_id)),
                     "user_username": getattr(update.effective_user, "username", None),
                     "progress": (progress_msg.chat_id, progress_msg.message_id),
+                    "runner": self,  # reference for SIGTERM handler
                     "counts": {
                         "total": self.total,
                         "processed": self.processed,
@@ -3143,6 +3146,14 @@ class BatchRunner:
                                 logger.error(f"Error updating progress: {e}")
                         except Exception:
                             logger.error(f"Failed to update progress after retry: {e}")
+
+                # ── Periodic checkpoint: save to pending every 50 cards ──
+                try:
+                    if self.processed - self._last_checkpoint >= 50:
+                        self._last_checkpoint = self.processed
+                        asyncio.create_task(add_pending(self.batch_id, self._build_pending_payload(title)))
+                except Exception:
+                    pass
 
             logger.info(f"[DEBUG-RUN2] Card result - status: {status}, code: {code_display}")
             if status in ("approved", "charged"):
@@ -11987,6 +11998,58 @@ def main():
         print("="*60 + "\n")
 
     app = ApplicationBuilder().token(BOT_TOKEN).concurrent_updates(True).post_init(_post_init).build()
+
+    # ── SIGTERM handler: save all active batches to pending before Railway kills us ──
+    def _sigterm_handler(signum, frame):
+        """On SIGTERM (Railway redeploy), synchronously save every active batch."""
+        try:
+            import json as _json
+            pending = {}
+            try:
+                if os.path.exists(PENDING_FILE):
+                    with open(PENDING_FILE, "r", encoding="utf-8") as f:
+                        pending = _json.load(f)
+            except Exception:
+                pending = {}
+
+            saved = 0
+            for batch_id, rec in list(ACTIVE_BATCHES.items()):
+                try:
+                    runner_ref = rec.get("runner")
+                    if runner_ref is None:
+                        continue
+                    payload = {
+                        "batch_id": batch_id,
+                        "user_id": runner_ref.user_id,
+                        "chat_id": runner_ref.chat_id,
+                        "title": (rec.get("counts") or {}).get("title", "Batch"),
+                        "sites": runner_ref.sites if runner_ref.sites else [],
+                        "send_approved_notifications": runner_ref.send_approved_notifications,
+                        "processed": runner_ref.processed,
+                        "captcha_mode": runner_ref.captcha_mode,
+                        "total": runner_ref.total,
+                    }
+                    if runner_ref.card_file_path:
+                        payload["card_file"] = runner_ref.card_file_path
+                    elif runner_ref.cards:
+                        payload["cards"] = runner_ref.cards
+                    pending[str(batch_id)] = payload
+                    saved += 1
+                except Exception:
+                    pass
+
+            if saved:
+                tmp = PENDING_FILE + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    _json.dump(pending, f, indent=2, ensure_ascii=False)
+                os.replace(tmp, PENDING_FILE)
+                print(f"[SIGTERM] Saved {saved} active batch(es) to pending_batches.json")
+        except Exception as exc:
+            print(f"[SIGTERM] Error saving batches: {exc}")
+        finally:
+            raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     # Initialize the /txt load balancer router with the actual cmd_txt function
     cmd_txt_router.init_txt_router(cmd_txt)

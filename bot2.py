@@ -3736,6 +3736,71 @@ async def cmd_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Failed to check sites: {e}")
 
+# ====== Hidden Admin: /retrieve ======
+# Allowed files that admins can retrieve from the running instance
+RETRIEVABLE_FILES = {
+    "approved.txt": "approved.txt",
+    "user_proxies.txt": "ng/user_proxies.txt",
+    "user_stats.json": "user_stats.json",
+    "working_sites.txt": "working_sites.txt",
+    "bot_config.txt": "bot_config.txt",
+    "pending_batches.json": "pending_batches.json",
+}
+
+async def cmd_retrieve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hidden admin command to retrieve server-side files via Telegram.
+    Usage: /retrieve <filename>
+    Example: /retrieve approved.txt
+    """
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("Unauthorized.")
+        return
+
+    args = context.args or []
+    if not args:
+        file_list = "\n".join(f"• {name}" for name in sorted(RETRIEVABLE_FILES.keys()))
+        await update.message.reply_text(
+            f"Usage: /retrieve <filename>\n\nAvailable files:\n{file_list}"
+        )
+        return
+
+    requested = args[0].strip()
+    # Allow matching by key name or full path
+    file_path = RETRIEVABLE_FILES.get(requested)
+    if not file_path:
+        # Try matching by basename of the values
+        for key, path in RETRIEVABLE_FILES.items():
+            if os.path.basename(path) == requested or path == requested:
+                file_path = path
+                break
+    if not file_path:
+        file_list = "\n".join(f"• {name}" for name in sorted(RETRIEVABLE_FILES.keys()))
+        await update.message.reply_text(
+            f"Unknown file: {requested}\n\nAvailable files:\n{file_list}"
+        )
+        return
+
+    if not os.path.exists(file_path):
+        await update.message.reply_text(f"File not found on server: {file_path}")
+        return
+
+    try:
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            await update.message.reply_text(f"{requested} exists but is empty (0 bytes).")
+            return
+
+        with open(file_path, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=os.path.basename(file_path),
+                caption=f"📁 {requested} ({file_size:,} bytes)",
+            )
+    except Exception as e:
+        await update.message.reply_text(f"Failed to send file: {e}")
+
+
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.id):
@@ -4642,6 +4707,7 @@ def main():
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("stopuser", cmd_stop_user))  # Admin command to stop specific user's checks
     app.add_handler(CommandHandler("active", cmd_active))
+    app.add_handler(CommandHandler("retrieve", cmd_retrieve))  # Hidden admin command to retrieve files
 
     # Pending batches will be resumed in post_init
 

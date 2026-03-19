@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Runtime data files (generated on server, not needed in repo)
+approved.txt
+approve.txt
+user_stats.json
+pending_batches.json
+
+# User uploads (generated at runtime)
+uploads/
+
+# User proxies (runtime data)
+ng/user_proxies.txt
+ng/user_prox.txt
+
+# Proxy files (runtime)
+working_proxies.txt
+px.txt
+
+# Backup files
+*.bak
+*.tmp
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
