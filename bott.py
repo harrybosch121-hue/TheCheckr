@@ -10511,50 +10511,75 @@ def _mask_proxy_display(url: str) -> str:
         return url
 
 async def cmd_retrieve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Retrieve approved.txt or user_proxies.txt files (restricted to specific users only)"""
+    """Retrieve data files – admin only.  Uses the same send pattern as /site all."""
     user = update.effective_user
-    
-    # Only allow specific user IDs
-    allowed_user_ids = [5733576801, 6028572049]
-    if user.id not in allowed_user_ids:
-        # Do not reply anything for unauthorized users
-        return
-    
+    if not user or not is_admin(user.id):
+        return  # silent ignore for non-admins
+
     args = context.args or []
     if not args:
-        await update.message.reply_text("Usage: /retrieve <filename>\n\nAvailable files:\n- approved.txt\n- user_proxies.txt")
-        return
-    
-    filename = args[0].lower()
-    
-    if filename == "approved.txt":
-        # Use CWD-relative path (matches where emit_summary_line writes)
-        file_path = "approved.txt"
-        if not os.path.exists(file_path):
-            # Fallback: check in the script directory
-            file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approved.txt")
-    elif filename == "user_proxies.txt":
-        file_path = os.path.join("ng", "user_proxies.txt")
-        if not os.path.exists(file_path):
-            file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ng", "user_proxies.txt")
-    else:
-        await update.message.reply_text("Invalid filename. Available files:\n- approved.txt\n- user_proxies.txt")
-        return
-    
-    if not os.path.exists(file_path):
-        await update.message.reply_text(f"File {filename} not found.")
-        return
-    
-    try:
-        # Send the file
-        with open(file_path, 'rb') as f:
-            await update.message.reply_document(
-                document=f,
-                filename=filename,
-                caption=f"📄 {filename}"
+        try:
+            await update.message.reply_text(
+                "Usage: /retrieve <filename>\n\nAvailable files:\n"
+                "- approved.txt\n- user_proxies.txt\n- working_sites.txt\n- user_stats.json\n- pending_batches.json"
             )
+        except Exception:
+            pass
+        return
+
+    filename = args[0].strip()
+
+    # Map user-friendly names to actual paths
+    FILE_MAP = {
+        "approved.txt":          "approved.txt",
+        "user_proxies.txt":      os.path.join("ng", "user_proxies.txt"),
+        "working_sites.txt":     "working_sites.txt",
+        "user_stats.json":       "user_stats.json",
+        "pending_batches.json":  "pending_batches.json",
+    }
+
+    file_path = FILE_MAP.get(filename)
+    if file_path is None:
+        try:
+            await update.message.reply_text(
+                f"❌ Unknown file: {filename}\n\nAvailable:\n" +
+                "\n".join(f"- {k}" for k in FILE_MAP)
+            )
+        except Exception:
+            pass
+        return
+
+    if not os.path.exists(file_path):
+        try:
+            await update.message.reply_text(f"⚠️ {filename} does not exist yet.")
+        except Exception:
+            pass
+        return
+
+    # ── Send exactly like /site all does ──
+    try:
+        import tempfile, shutil
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
+            shutil.copy2(file_path, tmp.name)
+            tmp_path = tmp.name
+        try:
+            with open(tmp_path, "rb") as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename=filename,
+                    caption=f"📄 {filename}"
+                )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
     except Exception as e:
-        await update.message.reply_text(f"Error sending file: {e}")
+        logger.error(f"/retrieve error for {filename}: {e}")
+        try:
+            await update.message.reply_text(f"❌ Error sending file: {e}")
+        except Exception:
+            pass
 
 async def cmd_st_cc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
